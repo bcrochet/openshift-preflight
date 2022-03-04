@@ -3,9 +3,13 @@ package pyxis
 import (
 	"context"
 	"errors"
+	"net/http"
 
+	graphqlserver "github.com/graph-gophers/graphql-go"
+	"github.com/graph-gophers/graphql-go/relay"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	log "github.com/sirupsen/logrus"
 )
 
 var _ = Describe("Pyxis Submit", func() {
@@ -208,6 +212,32 @@ var _ = Describe("Pyxis GetProject 401 Unauthorized", func() {
 				certProject, err := pyxisEngine.GetProject(context.Background())
 				Expect(err).To(MatchError(errors.New("error calling remote API")))
 				Expect(certProject).To(BeNil())
+			})
+		})
+	})
+})
+
+var _ = Describe("Pyxis GraphQL Submit", func() {
+	var pyxisGraphqlEngine *pyxisGraphqlEngine
+	schema, err := graphqlserver.ParseSchema(Schema, &Resolver{})
+	if err != nil {
+		log.Error(err)
+	}
+	Expect(err).ToNot(HaveOccurred())
+	mux := http.NewServeMux()
+	mux.Handle("/query", &relay.Handler{Schema: schema})
+
+	BeforeEach(func() {
+		pyxisGraphqlEngine = NewPyxisGraphqlEngine("/query", "spiffyapitoken", "cool-project", &http.Client{Transport: localRoundTripper{handler: mux}})
+	})
+	Context("when a project is submitted", func() {
+		Context("and it is not already In Progress", func() {
+			It("should switch to In Progress", func() {
+				certProject, certImage, testResults, err := pyxisGraphqlEngine.SubmitResults(context.Background(), &CertProject{}, &CertImage{}, &RPMManifest{}, &TestResults{})
+				Expect(err).To(MatchError(errors.New("error calling remote API")))
+				Expect(certProject).To(BeNil())
+				Expect(certImage).To(BeNil())
+				Expect(testResults).To(BeNil())
 			})
 		})
 	})

@@ -65,29 +65,29 @@ func getResponse(r runtime.Results) UserResponse {
 
 // UserResponse is the standard user-facing response.
 type UserResponse struct {
-	Image             string                 `json:"image" xml:"image"`
-	Passed            bool                   `json:"passed" xml:"passed"`
-	CertificationHash string                 `json:"certification_hash,omitempty" xml:"certification_hash,omitempty"`
-	LibraryInfo       version.VersionContext `json:"test_library" xml:"test_library"`
+	Image             string                 `json:"image" xml:"image" graphql:"image"`
+	Passed            bool                   `json:"passed" xml:"passed" graphql:"passed"`
+	CertificationHash string                 `json:"certification_hash,omitempty" xml:"certification_hash,omitempty" graphql:"certification_hash"`
+	LibraryInfo       version.VersionContext `json:"test_library" xml:"test_library" graphql:"test_library"`
+	Results           resultsText            `json:"results" xml:"results" graphql:"results"`
 	// TestedOn          runtime.OpenshiftClusterVersion `json:"tested_on" xml:"tested_on"`
-	Results resultsText `json:"results" xml:"results"`
 }
 
 // resultsText represents the results of check execution against the asset.
 type resultsText struct {
-	Passed []checkExecutionInfo `json:"passed" xml:"passed"`
-	Failed []checkExecutionInfo `json:"failed" xml:"failed"`
-	Errors []checkExecutionInfo `json:"errors" xml:"errors"`
+	Passed []checkExecutionInfo `json:"passed" xml:"passed" graphql:"passed"`
+	Failed []checkExecutionInfo `json:"failed" xml:"failed" graphql:"failed"`
+	Errors []checkExecutionInfo `json:"errors" xml:"errors" graphql:"errors"`
 }
 
 // checkExecutionInfo contains all possible output fields that a user might see in their result.
 // Empty fields will be omitted.
 type checkExecutionInfo struct {
-	Name             string  `json:"name,omitempty" xml:"name,omitempty"`
-	ElapsedTime      float64 `json:"elapsed_time" xml:"elapsed_time"`
-	Description      string  `json:"description,omitempty" xml:"description,omitempty"`
-	Help             string  `json:"help,omitempty" xml:"help,omitempty"`
-	Suggestion       string  `json:"suggestion,omitempty" xml:"suggestion,omitempty"`
-	KnowledgeBaseURL string  `json:"knowledgebase_url,omitempty" xml:"knowledgebase_url,omitempty"`
-	CheckURL         string  `json:"check_url,omitempty" xml:"check_url,omitempty"`
+	Name             string  `json:"name,omitempty" xml:"name,omitempty" graphql:"name"`
+	ElapsedTime      float64 `json:"elapsed_time" xml:"elapsed_time" graphql:"elapsed_time"`
+	Description      string  `json:"description,omitempty" xml:"description,omitempty" graphql:"description"`
+	Help             string  `json:"help,omitempty" xml:"help,omitempty" graphql:"help"`
+	Suggestion       string  `json:"suggestion,omitempty" xml:"suggestion,omitempty" graphql:"suggestion"`
+	KnowledgeBaseURL string  `json:"knowledgebase_url,omitempty" xml:"knowledgebase_url,omitempty" graphql:"knowledgebase_url"`
+	CheckURL         string  `json:"check_url,omitempty" xml:"check_url,omitempty" graphql:"check_url"`
 }

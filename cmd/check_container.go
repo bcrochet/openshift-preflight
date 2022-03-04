@@ -75,15 +75,17 @@ var checkContainerCmd = &cobra.Command{
 			projectId = strings.Split(projectId, "-")[1]
 		}
 		apiToken := viper.GetString("pyxis_api_token")
+
 		ctx := context.Background()
-		pyxisEngine := pyxis.NewPyxisEngine(apiToken, projectId, &http.Client{Timeout: 60 * time.Second})
-		certProject, err := pyxisEngine.GetProject(ctx)
+		pyxisGraphqlEngine := pyxis.NewPyxisGraphqlEngine(pyxis.GetPyxisGraphqlUrl(), apiToken, projectId, &http.Client{Timeout: 60 * time.Second})
+		// pyxisEngine := pyxis.NewPyxisEngine(apiToken, projectId, &http.Client{Timeout: 60 * time.Second})
+		certProject, err := pyxisGraphqlEngine.GetProject(ctx)
 		if err != nil {
 			log.Error(err, "could not retrieve project")
 			return err
 		}
 		log.Debugf("Certification project name is: %s", certProject.Name)
-		if certProject.OsContentType == "scratch" {
+		if certProject.Container.OsContentType == "scratch" {
 			cfg.EnabledChecks = engine.ScratchContainerPolicy()
 			cfg.Scratch = true
 		}
@@ -194,7 +196,7 @@ var checkContainerCmd = &cobra.Command{
 				return err
 			}
 
-			_, certImage, _, err = pyxisEngine.SubmitResults(certProject, certImage, rpmManifest, testResults)
+			_, certImage, _, err = pyxisGraphqlEngine.SubmitResults(ctx, certProject, certImage, rpmManifest, testResults)
 			if err != nil {
 				return err
 			}

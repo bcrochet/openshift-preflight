@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -247,3 +248,42 @@ func (fhc fakeHttpCreateTestResultsUnauthorizedClient) Do(req *http.Request) (*h
 
 	return &http.Response{StatusCode: statusCode, Body: io.NopCloser(bytes.NewReader([]byte(results)))}, nil
 }
+
+type localRoundTripper struct {
+	handler http.Handler
+}
+
+func (l localRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	w := httptest.NewRecorder()
+	l.handler.ServeHTTP(w, req)
+	return w.Result(), nil
+}
+
+// func (r *Resolver) GetPing() *string {
+// 	ret := "pong"
+// 	return &ret
+// }
+
+// func (r *Resolver) GetImage(args struct{ Id string }) *containerImageResolver {
+// 	return &containerImageResolver{id}
+// }
+
+// func (r *Resolver) CertificationProject(args struct{}) *certificationProjectResolver {
+// 	return &certificationProjectResolver{}
+// }
+
+type containerImage struct{}
+
+type certificationProject interface {
+	ID() string
+	Name() string
+}
+
+type certificationProjectResolver struct {
+	certificationProject
+}
+
+type (
+	MutationResolver interface{}
+	QueryResolver    interface{}
+)

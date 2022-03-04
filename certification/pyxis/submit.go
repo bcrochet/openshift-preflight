@@ -62,3 +62,54 @@ func (p *pyxisEngine) SubmitResults(certProject *CertProject, certImage *CertIma
 
 	return certProject, certImage, testResults, nil
 }
+
+func (p *pyxisGraphqlEngine) SubmitResults(ctx context.Context, certProject *CertProject, certImage *CertImage, rpmManifest *RPMManifest, testResults *TestResults) (*CertProject, *CertImage, *TestResults, error) {
+	var err error
+	oldProject := *certProject
+
+	if certProject.CertificationStatus == "Started" {
+		certProject.CertificationStatus = "In Progress"
+	}
+
+	if *certProject != oldProject {
+		certProject, err = p.updateProject(ctx, certProject)
+		if err != nil {
+			log.Error(err, "could not update project")
+			return nil, nil, nil, err
+		}
+	}
+	certProject, err = p.updateProject(ctx, certProject)
+	if err != nil {
+		log.Error(err, "could not update project")
+		return nil, nil, nil, err
+	}
+
+	newCertImage, graphqlError, err := p.createImage(ctx, certImage)
+	if err != nil && graphqlError != nil && graphqlError.Status != 409 {
+		log.Error(err, "could not create image")
+		return nil, nil, nil, err
+	}
+	if err != nil && graphqlError != nil && graphqlError.Status == 409 {
+		newCertImage, graphqlError, err = p.getImage(ctx, certImage.DockerImageDigest)
+		if err != nil {
+			log.Debugf("%d: %s", graphqlError.Status, graphqlError.Detail)
+			return nil, nil, nil, err
+		}
+	}
+
+	rpmManifest.ImageID = certImage.ID
+	_, graphqlError, err = p.createRPMManifest(ctx, rpmManifest)
+	if err != nil && graphqlError != nil && graphqlError.Status != 409 {
+		log.Error(err, "could not create rpm manifest")
+		return nil, nil, nil, err
+	}
+
+	testResults.ImageID = certImage.ID
+	testResults, err = p.createTestResults(ctx, testResults)
+	if err != nil {
+		log.Error(err, "could not create test results")
+		return nil, nil, nil, err
+	}
+
+	return certProject, newCertImage, testResults, nil
+}

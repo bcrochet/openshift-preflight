@@ -239,7 +239,7 @@ func (p *pyxisEngine) GetProject(ctx context.Context) (*CertProject, error) {
 
 	var certProject CertProject
 	if err := json.Unmarshal(body, &certProject); err != nil {
-		log.Error(err)
+		log.Error(fmt.Errorf("%w: %s", err, string(body)))
 		return nil, err
 	}
 
@@ -335,6 +335,7 @@ func (p *pyxisEngine) newRequestWithApiToken(ctx context.Context, method string,
 	}
 
 	req.Header.Add("X-API-KEY", p.ApiToken)
+	req.Header.Add("Accept", "application/json")
 
 	if body != nil {
 		req.Header.Add("Content-type", "application/json")

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
@@ -53,7 +54,8 @@ func (c *CraneEngine) ExecuteChecks() error {
 	log.Debug("target image: ", c.Image)
 
 	// prepare crane runtime options, if necessary
-	options := make([]crane.Option, 0)
+	options := make([]crane.Option, 0, 1)
+	options = append(options, crane.WithAuthFromKeychain(authn.DefaultKeychain))
 
 	// pull the image and save to fs
 	log.Debug("pulling image from target registry")
