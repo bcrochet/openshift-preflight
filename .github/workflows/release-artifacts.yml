@@ -4,32 +4,39 @@ on:
   release:
     types:
       - created
+  push:
+    branches: [ ghactions ]
 
 jobs:
-  build-binaries:
+  releases-matrix:
+    name: Release Matrix
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [ linux ]
+        goarch: 
+          - amd64
+          - arm64
+          - ppc64le
+          - s390x
     steps:
 
     - name: code checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
     - name: Set Env Tags
       run: echo RELEASE_TAG=$(echo $GITHUB_REF | cut -d '/' -f 3) >> $GITHUB_ENV
 
-    - name: Install system deps
-      run: 'sudo apt update && sudo apt install -y libgpgme-dev libbtrfs-dev libdevmapper-dev'
-
-    - name: Set up Go
-      uses: actions/setup-go@v2
+    - name: Go Release Action
+      uses: bcrochet/go-release-action@optional-compression
       with:
-        go-version: 1.17
-    
-    - name: Build Multi-arch binaries
-      id: build-multi-arch-binaries
-      run: make build-multi-arch
-
-    - name: Upload binaries to the release
-      uses: AButler/upload-release-assets@v2.0
-      with:
-        files: "preflight*"
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        goos: ${{ matrix.goos }}
+        goarch: ${{ matrix.goarch }}
+        goversion: 1.17
+        build_command: make build BINARY=preflight-${{ matrix.goos }}-${{ matrix.goarch }}
+        binary_name: preflight-${{ matrix.goos }}-${{ matrix.goarch }}
+        asset_name: preflight-${{ matrix.goos}}-${{ matrix.goarch}}
+        compress_assets: false
+        md5sum: false
+        sha256sum: true
