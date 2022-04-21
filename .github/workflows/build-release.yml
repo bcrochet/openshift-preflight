@@ -1,13 +1,9 @@
 name: Build Release
 
 on:
-  push:
-    tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
-      - '[0-9]+.[0-9]+.[0-9]+-alpha[0-9]+'
-      - '[0-9]+.[0-9]+.[0-9]+-beta[0-9]+'
-      - '[0-9]+.[0-9]+.[0-9]+-rc[0-9]+'
-    branches: [ ghactions ]
+  release:
+    types:
+      - published
 
 env:
   IMAGE_NAME: preflight
@@ -22,8 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
-    - name: Set Env Tags
-      run: echo RELEASE_TAG=$(echo $GITHUB_REF | cut -d '/' -f 3) >> $GITHUB_ENV
 
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v1
@@ -33,10 +27,10 @@ jobs:
       uses: redhat-actions/buildah-build@v2
       with:
         image: ${{ secrets.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: ${{ env.RELEASE_TAG }}-${{ matrix.platform }}-${{ matrix.architecture }}
+        tags: ${{ env.GITHUB_REF }}-${{ matrix.platform }}-${{ matrix.architecture }}
         archs: ${{ matrix.architecture }}
         build-args: |
-          release_tag=${{env.RELEASE_TAG }}
+          release_tag=${{env.GITHUB_REF }}
           ARCH=${{ matrix.architecture }}
         dockerfiles: |
           ./Dockerfile
@@ -46,7 +40,7 @@ jobs:
       uses: redhat-actions/push-to-registry@v2
       with:
         image: ${{ env.IMAGE_NAME }}
-        tags: ${{ env.RELEASE_TAG }}-${{ matrix.platform }}-${{ matrix.architecture }}
+        tags: ${{ env.GITHUB_REF }}-${{ matrix.platform }}-${{ matrix.architecture }}
         registry: ${{ secrets.IMAGE_REGISTRY }}
         username: ${{ secrets.REGISTRY_USER }}
         password: ${{ secrets.REGISTRY_PASSWORD }}
@@ -56,7 +50,7 @@ jobs:
 
     outputs:
       imageName: ${{ env.IMAGE_NAME }}
-      imageVersion: ${{ env.RELEASE_TAG }}
+      imageVersion: ${{ env.GITHUB_REF }}
 
   build-multiarch:
     needs: build-release
@@ -68,3 +62,14 @@ jobs:
       registry: ${{ secrets.IMAGE_REGISTRY }}
       user: ${{ secrets.REGISTRY_USER }}
       password: ${{ secrets.REGISTRY_PASSWORD }}
+
+  extract-assets:
+    needs: build-release
+    uses: ./.github/workflows/release-artifacts.yml
+
+    with:
+      name: ${{ needs.build-release.outputs.imageName }}
+      tag: ${{ needs.build-release.outputs.imageVersion }}
+    secrets:
+      registry: ${{ secrets.IMAGE_REGISTRY }}
+      token: ${{ secrets.GITHUB_TOKEN }}
