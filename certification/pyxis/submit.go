@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/google/go-containerregistry/pkg/name"
+	log "github.com/sirupsen/logrus"
 )
 
 var defaultRegistryAlias = "docker.io"
@@ -101,6 +103,12 @@ func (p *pyxisClient) SubmitResults(ctx context.Context, certInput *Certificatio
 		return nil, fmt.Errorf("could not create test results: %v", err)
 	}
 
+	sha, err := executableSha256()
+	if err != nil {
+		return nil, fmt.Errorf("could not get SHA-256 for current executable: %v", err)
+	}
+	log.Debugf("The SHA-256 of the current executable is: %s", sha)
+
 	// Return the results with up-to-date information.
 	return &CertificationResults{
 		CertProject: certProject,
@@ -117,4 +125,21 @@ func normalizeDockerRegistry(registry string) string {
 	}
 
 	return registry
+}
+
+func executableSha256() (string, error) {
+	// Get the SHA256 of the binary being used
+	bin, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("could not get the path of the current executable: %v", err)
+	}
+	binFile, err := os.Open(bin)
+	if err != nil {
+		return "", fmt.Errorf("could not open the current executable for reading: %v", err)
+	}
+	sha, err := BinarySHA(binFile)
+	if err != nil {
+		return "", fmt.Errorf("could not calculate SHA-256 of current executable: %v", err)
+	}
+	return sha, nil
 }
