@@ -8,8 +8,10 @@ require (
 	github.com/charmbracelet/bubbletea v0.22.0
 	github.com/charmbracelet/lipgloss v0.5.0
 	github.com/docker/cli v20.10.16+incompatible
+	github.com/erikgeiser/promptkit v0.7.0
 	github.com/google/go-containerregistry v0.10.0
 	github.com/knqyf263/go-rpmdb v0.0.0-20220629110411-9a3bd2ebb923
+	github.com/mritd/bubbles v0.0.0-20210825105013-cb7a572fb831
 	github.com/onsi/ginkgo/v2 v2.1.3
 	github.com/onsi/gomega v1.18.1
 	github.com/openshift/api v0.0.0-20210910062324-a41d3573a3ba

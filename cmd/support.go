@@ -7,7 +7,6 @@ import (
 	"regexp"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 const (
@@ -27,7 +26,6 @@ var projectTypeMapping = map[string]string{
 	"container": containerImage,
 	"operator":  operatorBundleImage,
 }
-var interactive bool
 
 func supportCmd() *cobra.Command {
 	supportCmd := &cobra.Command{
@@ -35,9 +33,6 @@ func supportCmd() *cobra.Command {
 		Short: "Creates a support request",
 		Long:  `Generate a URL that can be used to open a ticket with Red Hat Support if you're having an issue passing certification checks.`,
 	}
-
-	supportCmd.PersistentFlags().BoolVar(&interactive, "interactive", false, "Run the support prompt interactively.")
-	viper.BindPFlag("interactive", supportCmd.PersistentFlags().Lookup("interactive"))
 
 	supportCmd.AddCommand(supportOperatorCmd())
 	supportCmd.AddCommand(supportContainerCmd())

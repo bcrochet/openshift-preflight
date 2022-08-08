@@ -13,7 +13,10 @@ import (
 	"github.com/spf13/viper"
 )
 
-var configFileUsed bool
+var (
+	configFileUsed bool
+	interactive    bool
+)
 
 func init() {
 	cobra.OnInitialize(initConfig)
@@ -34,6 +37,9 @@ func rootCmd() *cobra.Command {
 
 	rootCmd.PersistentFlags().String("loglevel", "", "The verbosity of the preflight tool itself. Ex. warn, debug, trace, info, error. (env: PFLT_LOGLEVEL)")
 	viper.BindPFlag("loglevel", rootCmd.PersistentFlags().Lookup("loglevel"))
+
+	rootCmd.PersistentFlags().BoolVar(&interactive, "interactive", false, "Run the support prompt interactively.")
+	viper.BindPFlag("interactive", rootCmd.PersistentFlags().Lookup("interactive"))
 
 	rootCmd.AddCommand(checkCmd())
 	rootCmd.AddCommand(listChecksCmd())

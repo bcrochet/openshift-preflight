@@ -6,10 +6,11 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mritd/bubbles/prompt"
 )
 
 type OperatorPromptModel struct {
-	inputs     []textinput.Model
+	inputs     []*prompt.Model
 	focusIndex int
 	done       bool
 	err        error
@@ -17,23 +18,25 @@ type OperatorPromptModel struct {
 
 func NewOperatorPrompt() *OperatorPromptModel {
 	m := &OperatorPromptModel{
-		inputs: make([]textinput.Model, 2),
+		inputs: make([]*prompt.Model, 2),
 		err:    nil,
 	}
 
-	var t textinput.Model
+	var t prompt.Model
 	for i := range m.inputs {
-		t = textinput.New()
-		t.CursorStyle = cursorStyle
-		t.CharLimit = 16
 
 		switch i {
 		case 0:
+			t = prompt.New("Project ID?")
+			t.Template = customTemplate
+			t.ResultTemplate = customResultTemplate
+			t.CharLimit = 16
 			t.Placeholder = "Project ID required"
-			t.Focus()
-			t.PromptStyle = focusedStyle
-			t.TextStyle = focusedStyle
 		case 1:
+			t = prompt.New("Pull Request URL?")
+			t.Template = customTemplate
+			t.ResultTemplate = customResultTemplate
+			t.CharLimit = 16
 			t.Placeholder = "Pull Request URL, https://..."
 			t.CharLimit = 255
 		}
@@ -48,7 +51,7 @@ func (c OperatorPromptModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-func (c OperatorPromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (c *OperatorPromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -76,15 +79,9 @@ func (c OperatorPromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i := 0; i <= len(c.inputs)-1; i++ {
 				if i == c.focusIndex {
 					// Set focused state
-					cmds[i] = c.inputs[i].Focus()
-					c.inputs[i].PromptStyle = focusedStyle
-					c.inputs[i].TextStyle = focusedStyle
 					continue
 				}
 				// Remove focused state
-				c.inputs[i].Blur()
-				c.inputs[i].PromptStyle = noStyle
-				c.inputs[i].TextStyle = noStyle
 			}
 
 			return c, tea.Batch(cmds...)
