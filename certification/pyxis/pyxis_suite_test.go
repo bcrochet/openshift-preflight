@@ -61,24 +61,41 @@ func (p *pyxisProjectHandler) ServeHTTP(response http.ResponseWriter, request *h
 	if request.Body != nil {
 		defer request.Body.Close()
 	}
+
 	switch {
-	case request.Method == http.MethodGet && request.Header["X-Api-Key"][0] == "my-401-project-api-token":
-		response.WriteHeader(http.StatusUnauthorized)
+	case request.Header["X-Api-Key"][0] == "my-spiffy-api-token":
+		mustWrite(response, `{"_id":"deadb33f","certification_status":"Started","name":"My Spiffy Project","project_status":"Foo","type":"Containers","container":{"docker_config_json":"{}","type":"Containers"}}`)
+		return
 	case request.Header["X-Api-Key"][0] == "my-bad-project-api-token":
 		response.WriteHeader(http.StatusUnauthorized)
+		return
 	case request.Header["X-Api-Key"][0] == "my-index-docker-io-project-api-token":
 		mustWrite(response, `{"_id":"deadb33f","certification_status":"Started","name":"My Index Docker IO Project","project_status":"Foo","type":"Containers","container":{"docker_config_json":"{}","type":"Containers","registry":"docker.io", "repository":"my/repo"}}`)
-	case request.Method == http.MethodPatch && request.Header["X-Api-Key"][0] == "my-error-project-api-token":
-		response.WriteHeader(http.StatusInternalServerError)
-	case request.Method == http.MethodPost:
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			response.WriteHeader(http.StatusBadRequest)
-		}
-		mustWrite(response, string(body))
+		return
 	default:
-		mustWrite(response, `{"_id":"deadb33f","certification_status":"Started","name":"My Spiffy Project","project_status":"Foo","type":"Containers","container":{"docker_config_json":"{}","type":"Containers"}}`)
+		switch request.Method {
+		case http.MethodGet:
+			switch request.Header["X-Api-Key"][0] {
+			case "my-401-project-api-token":
+				response.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		case http.MethodPost:
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				response.WriteHeader(http.StatusBadRequest)
+			}
+			mustWrite(response, string(body))
+			return
+		case http.MethodPatch:
+			switch request.Header["X-Api-Key"][0] {
+			case "my-error-project-api-token":
+				response.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
 	}
+	mustWrite(response, `{"_id":"deadb33f","certification_status":"Started","name":"My Spiffy Project","project_status":"Foo","type":"Containers","container":{"docker_config_json":"{}","type":"Containers"}}`)
 }
 
 func (p *pyxisImageHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
