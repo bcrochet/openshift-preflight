@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	goruntime "runtime"
 
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/artifacts"
@@ -28,6 +27,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/spf13/afero"
 )
 
 var _ = Describe("Execute Checks tests", func() {
@@ -57,10 +57,12 @@ var _ = Describe("Execute Checks tests", func() {
 		err = crane.Push(img, src)
 		Expect(err).ToNot(HaveOccurred())
 
-		tmpDir, err := os.MkdirTemp("", "preflight-engine-test-*")
+		fs := afero.NewMemMapFs()
+
+		tmpDir, err := afero.TempDir(fs, "", "preflight-engine-test-")
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(os.RemoveAll, tmpDir)
-		aw, err := artifacts.NewFilesystemWriter(artifacts.WithDirectory(tmpDir))
+		DeferCleanup(fs.RemoveAll, tmpDir)
+		aw, err := artifacts.NewFilesystemWriter(artifacts.WithDirectory(tmpDir), artifacts.WithFileSystem(fs))
 		Expect(err).ToNot(HaveOccurred())
 		testcontext = artifacts.ContextWithWriter(context.Background(), aw)
 
@@ -123,6 +125,7 @@ var _ = Describe("Execute Checks tests", func() {
 			IsBundle:  false,
 			IsScratch: false,
 		}
+		engine.fs = fs
 	})
 	Context("Run the checks", func() {
 		It("should succeed", func() {

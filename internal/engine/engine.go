@@ -14,13 +14,13 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/spf13/afero"
 
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/artifacts"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/certification"
@@ -41,7 +41,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	cranev1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/cache"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
@@ -74,12 +73,8 @@ type CraneEngine struct {
 
 	imageRef image.ImageReference
 	results  certification.Results
-}
 
-func export(img cranev1.Image, w io.Writer) error {
-	fs := mutate.Extract(img)
-	_, err := io.Copy(w, fs)
-	return err
+	fs afero.Fs
 }
 
 func (c *CraneEngine) ExecuteChecks(ctx context.Context) error {
@@ -131,26 +126,26 @@ func (c *CraneEngine) ExecuteChecks(ctx context.Context) error {
 	}
 
 	// create tmpdir to receive extracted fs
-	tmpdir, err := os.MkdirTemp(os.TempDir(), "preflight-*")
+	tmpdir, err := afero.TempDir(c.fs, "", "preflight-")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary directory: %v", err)
 	}
 	logger.V(log.DBG).Info("created temporary directory", "path", tmpdir)
 	defer func() {
-		if err := os.RemoveAll(tmpdir); err != nil {
+		if err := c.fs.RemoveAll(tmpdir); err != nil {
 			logger.Error(err, "unable to clean up tmpdir", "tempDir", tmpdir)
 		}
 	}()
 
 	imageTarPath := path.Join(tmpdir, "cache")
-	if err := os.Mkdir(imageTarPath, 0o755); err != nil {
+	if err := c.fs.Mkdir(imageTarPath, 0o755); err != nil {
 		return fmt.Errorf("failed to create cache directory: %s: %v", imageTarPath, err)
 	}
 
 	img = cache.Image(img, cache.NewFilesystemCache(imageTarPath))
 
 	containerFSPath := path.Join(tmpdir, "fs")
-	if err := os.Mkdir(containerFSPath, 0o755); err != nil {
+	if err := c.fs.Mkdir(containerFSPath, 0o755); err != nil {
 		return fmt.Errorf("failed to create container expansion directory: %s: %v", containerFSPath, err)
 	}
 
@@ -164,11 +159,11 @@ func (c *CraneEngine) ExecuteChecks(ctx context.Context) error {
 		// extraction. These errors will be returned by the reader end
 		// on subsequent reads. If err == nil, the reader will return
 		// EOF.
-		w.CloseWithError(export(img, w))
+		w.CloseWithError(crane.Export(img, w))
 	}()
 
 	logger.V(log.DBG).Info("extracting container filesystem", "path", containerFSPath)
-	if err := untar(ctx, containerFSPath, r); err != nil {
+	if err := untar(ctx, afero.NewBasePathFs(c.fs, containerFSPath), r); err != nil {
 		return fmt.Errorf("failed to extract tarball: %v", err)
 	}
 
@@ -254,7 +249,7 @@ func (c *CraneEngine) ExecuteChecks(ctx context.Context) error {
 
 	if c.IsBundle { // for operators:
 		// hash the contents of the bundle.
-		md5sum, err := generateBundleHash(ctx, c.imageRef.ImageFSPath)
+		md5sum, err := generateBundleHash(ctx, afero.NewBasePathFs(c.fs, c.imageRef.ImageFSPath))
 		if err != nil {
 			logger.Error(err, "could not generate bundle hash")
 		}
@@ -308,14 +303,13 @@ func tagDigestBindingInfo(providedIdentifier string, resolvedDigest string) (msg
 	), false
 }
 
-func generateBundleHash(ctx context.Context, bundlePath string) (string, error) {
+func generateBundleHash(ctx context.Context, afs afero.Fs) (string, error) {
 	logger := logr.FromContextOrDiscard(ctx)
 	files := make(map[string]string)
-	fileSystem := os.DirFS(bundlePath)
 
 	hashBuffer := bytes.Buffer{}
 
-	_ = fs.WalkDir(fileSystem, ".", func(path string, d fs.DirEntry, err error) error {
+	_ = afero.Walk(afs, ".", func(path string, d fs.FileInfo, err error) error {
 		if err != nil {
 			return fmt.Errorf("could not read bundle directory: %s: %w", path, err)
 		}
@@ -325,7 +319,7 @@ func generateBundleHash(ctx context.Context, bundlePath string) (string, error) 
 		if d.IsDir() {
 			return nil
 		}
-		filebytes, err := fs.ReadFile(fileSystem, path)
+		filebytes, err := afero.ReadFile(afs, path)
 		if err != nil {
 			return fmt.Errorf("could not read file: %s: %w", path, err)
 		}
@@ -366,7 +360,7 @@ func (c *CraneEngine) Results(ctx context.Context) certification.Results {
 
 // Untar takes a destination path and a reader; a tar reader loops over the tarfile
 // creating the file structure at 'dst' along the way, and writing any files
-func untar(ctx context.Context, dst string, r io.Reader) error {
+func untar(ctx context.Context, fs afero.Fs, r io.Reader) error {
 	logger := logr.FromContextOrDiscard(ctx)
 	tr := tar.NewReader(r)
 
@@ -388,7 +382,7 @@ func untar(ctx context.Context, dst string, r io.Reader) error {
 		}
 
 		// the target location where the dir/file should be created
-		target := filepath.Join(dst, header.Name)
+		target := header.Name
 
 		// the following switch could also be done using fi.Mode(), not sure if there
 		// a benefit of using one vs. the other.
@@ -398,15 +392,15 @@ func untar(ctx context.Context, dst string, r io.Reader) error {
 		switch header.Typeflag {
 		// if its a dir and it doesn't exist create it
 		case tar.TypeDir:
-			if _, err := os.Stat(target); err != nil {
-				if err := os.MkdirAll(target, 0o755); err != nil {
+			if _, err := fs.Stat(target); err != nil {
+				if err := fs.MkdirAll(target, 0o755); err != nil {
 					return err
 				}
 			}
 
 		// if it's a file create it
 		case tar.TypeReg:
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			f, err := fs.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
 			if err != nil {
 				return err
 			}
@@ -422,9 +416,11 @@ func untar(ctx context.Context, dst string, r io.Reader) error {
 
 			// if it's a link create it
 		case tar.TypeSymlink:
-			err := os.Symlink(header.Linkname, filepath.Join(dst, header.Name))
+			// Check that filesystem can create links
+			symlinkFs := fs.(afero.Linker)
+			err := symlinkFs.SymlinkIfPossible(header.Linkname, header.Name)
 			if err != nil {
-				logger.V(log.DBG).Info(fmt.Sprintf("Error creating link: %s. Ignoring.", header.Name))
+				logger.V(log.DBG).Info(fmt.Sprintf("Error creating link: %s. %v. Ignoring.", header.Name, err))
 				continue
 			}
 		}
@@ -692,6 +688,7 @@ func New(ctx context.Context,
 		IsScratch:    isScratch,
 		Platform:     platform,
 		Insecure:     insecure,
+		fs:           afero.NewOsFs(),
 	}, nil
 }
 

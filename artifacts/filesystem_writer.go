@@ -40,6 +40,12 @@ func WithDirectory(dir string) FilesystemWriterOption {
 	}
 }
 
+func WithFileSystem(fs afero.Fs) FilesystemWriterOption {
+	return func(w *FilesystemWriter) {
+		w.fs = fs
+	}
+}
+
 type FilesystemWriterOption = func(*FilesystemWriter)
 
 // WriteFile places contents into dir at filename.
