@@ -4,9 +4,9 @@ package registration
 
 // Plugin initialization
 import (
-	// _ "github.com/opdev/container-certification/plugin"
-	// _ "github.com/opdev/container-certification/plugin/rootexception"
-	// _ "github.com/opdev/container-certification/plugin/scratchexception"
+	_ "github.com/opdev/container-certification"
+	_ "github.com/opdev/container-certification/rootexception"
+	_ "github.com/opdev/container-certification/scratchexception"
 	_ "github.com/opdev/operator-certification"
-	// _ "github.com/opdev/plugin-template/plugin"
+	// _ "github.com/opdev/plugin-template"
 )

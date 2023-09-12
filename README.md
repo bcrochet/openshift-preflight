@@ -4,8 +4,8 @@ Pluggable Certification.
 
 ## Building and Registering a Plugin
 
-- Implement the [Plugin](./plugin/v0/plugin.go#L44)
-- Create an `init` function somewhere in your plugin codebase that calls the [Register](./plugin/aliases.go#L8) function
+- Implement the [Plugin](./plugin.go#L43)
+- Create an `init` function somewhere in your plugin codebase that calls the [Register](./plugin.go#L31) function
 - Submit a PR to the repository adding a blank-initialization of your plugin code (ex. [here](./plugin/registration/add_plugins_here.go#L8))
 - Ensure the go.mod value for your plugin points to your version. The repository
   encourages semantic versioning, and will represent plugin versions to users.
@@ -33,3 +33,13 @@ Pluggable Certification.
   will need to prefix your environment variables with `PFLT_`.
     - Dashes are converted to hyphens.
     - Other non-env special characters are not supported (e.g. period)
+
+
+## Review notes
+
+- The old preflight code was moved to the 'openshift-preflight' directory. It was moved as-is.
+- The knex repo was copied to the root of github.com/redhat-openshift-ecosystem/openshift-preflight
+- The module, however, is now named github.com/redhat-openshift-ecosystem/preflight
+- All of the existing plugins have been updated to point to this repo, but via a replace for now to bcrochet.
+- The plugin package was moved to the root of the repo. Instead of plugin.Plugin, it is now preflight.Plugin.
+- types was also moved to the root. It is now preflight.Check, preflight.Result, etc.
