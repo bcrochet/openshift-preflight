@@ -48,9 +48,6 @@ func RunPreflight(
 	}
 
 	resultsFile, err := rw.OpenFile(resultsFilePath)
-	if err != nil {
-		return err
-	}
 
 	defer resultsFile.Close()
 	resultsOutputTarget := io.MultiWriter(os.Stdout, resultsFile)
