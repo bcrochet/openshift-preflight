@@ -9,7 +9,6 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
 
 	"github.com/go-logr/logr"
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 const (
@@ -22,21 +21,17 @@ var _ check.Check = &MaxLayersCheck{}
 type MaxLayersCheck struct{}
 
 func (p *MaxLayersCheck) Validate(ctx context.Context, imgRef image.ImageReference) (bool, error) {
-	layers, err := p.getDataToValidate(imgRef.ImageInfo)
-	if err != nil {
-		return false, fmt.Errorf("could not get image layers: %v", err)
-	}
-
-	return p.validate(ctx, layers)
+	layerCount := p.getDataToValidate(imgRef)
+	return p.validate(ctx, layerCount)
 }
 
-func (p *MaxLayersCheck) getDataToValidate(image cranev1.Image) ([]cranev1.Layer, error) {
-	return image.Layers()
+func (p *MaxLayersCheck) getDataToValidate(imgRef image.ImageReference) int {
+	return imgRef.GetLayerCount()
 }
 
-func (p *MaxLayersCheck) validate(ctx context.Context, layers []cranev1.Layer) (bool, error) {
-	logr.FromContextOrDiscard(ctx).V(log.DBG).Info("number of layers detected in image", "layerCount", len(layers))
-	return len(layers) <= acceptableLayerMax, nil
+func (p *MaxLayersCheck) validate(ctx context.Context, layerCount int) (bool, error) {
+	logr.FromContextOrDiscard(ctx).V(log.DBG).Info("number of layers detected in image", "layerCount", layerCount)
+	return layerCount <= acceptableLayerMax, nil
 }
 
 func (p *MaxLayersCheck) Name() string {

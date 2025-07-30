@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"time"
 
@@ -9,7 +10,6 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/openshift"
 
-	fakecranev1 "github.com/google/go-containerregistry/pkg/v1/fake"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,8 +27,18 @@ var _ = Describe("DeployableByOLMCheck", func() {
 	)
 
 	BeforeEach(func() {
-		fakeImage := fakecranev1.FakeImage{}
-		imageRef.ImageInfo = &fakeImage
+		// Create a basic test image reference
+		config := image.ParsedConfig{
+			Config: struct {
+				Labels map[string]string `json:"Labels"`
+				Cmd    []string          `json:"Cmd"`
+				User   string            `json:"User"`
+			}{},
+		}
+		configBytes, _ := json.Marshal(config)
+		imageRef = image.ImageReference{
+			ConfigBytes: configBytes,
+		}
 		imageRef.ImageFSPath = "./testdata/all_namespaces"
 
 		now := metav1.Now()

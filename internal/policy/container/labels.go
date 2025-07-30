@@ -1,9 +1,12 @@
 package container
 
-import cranev1 "github.com/google/go-containerregistry/pkg/v1"
+import "github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 
 // getContainerLabels is a helper function to obtain the labels from an images configfile
-func getContainerLabels(image cranev1.Image) (map[string]string, error) {
-	configFile, err := image.ConfigFile()
-	return configFile.Config.Labels, err
+func getContainerLabels(imgRef image.ImageReference) (map[string]string, error) {
+	config, err := imgRef.GetConfig()
+	if err != nil {
+		return nil, err
+	}
+	return config.Config.Labels, nil
 }
