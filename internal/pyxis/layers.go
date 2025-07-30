@@ -6,14 +6,14 @@ import (
 	"net/http"
 	"time"
 
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/opencontainers/go-digest"
 	"github.com/shurcooL/graphql"
 )
 
 // CertifiedImagesContainingLayers takes uncompressedLayerHashes and queries to a Red Hat Pyxis,
 // returning existing certified images from registry.access.redhat.com that contain any of the
 // IDs as its uncompressed top layer id.
-func (p *pyxisClient) CertifiedImagesContainingLayers(ctx context.Context, uncompressedLayerHashes []cranev1.Hash) ([]CertImage, error) {
+func (p *pyxisClient) CertifiedImagesContainingLayers(ctx context.Context, uncompressedLayerHashes []digest.Digest) ([]CertImage, error) {
 	layerIds := make([]graphql.String, 0, len(uncompressedLayerHashes))
 	for _, layer := range uncompressedLayerHashes {
 		layerIds = append(layerIds, graphql.String(layer.String()))

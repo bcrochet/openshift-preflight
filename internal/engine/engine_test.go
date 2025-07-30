@@ -31,7 +31,7 @@ import (
 
 var _ = Describe("Execute Checks tests", func() {
 	var src string
-	var engine craneEngine
+	var engine containersEngine
 	var testcontext context.Context
 	var s *httptest.Server
 	var u *url.URL
@@ -127,7 +127,7 @@ var _ = Describe("Execute Checks tests", func() {
 		)
 
 		emptyConfig := runtime.Config{}
-		engine = craneEngine{
+		engine = containersEngine{
 			dockerConfig: emptyConfig.DockerConfig,
 			image:        src,
 			checks: []check.Check{

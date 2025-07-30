@@ -2,9 +2,8 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
-	fakecranev1 "github.com/google/go-containerregistry/pkg/v1/fake"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -25,20 +24,22 @@ func getTrademarkLabels(bad bool) map[string]string {
 	return labels
 }
 
-func getProhibitedConfigFile() (*cranev1.ConfigFile, error) {
-	return &cranev1.ConfigFile{
-		Config: cranev1.Config{
-			Labels: getTrademarkLabels(false),
+func createTestImageRefWithTrademarkLabels(bad bool) image.ImageReference {
+	config := image.ParsedConfig{
+		Config: struct {
+			Labels map[string]string `json:"Labels"`
+			Cmd    []string          `json:"Cmd"`
+			User   string            `json:"User"`
+		}{
+			Labels: getTrademarkLabels(bad),
 		},
-	}, nil
-}
+	}
 
-func getBadProhibitedConfigFile() (*cranev1.ConfigFile, error) {
-	return &cranev1.ConfigFile{
-		Config: cranev1.Config{
-			Labels: getTrademarkLabels(true),
-		},
-	}, nil
+	configBytes, _ := json.Marshal(config)
+
+	return image.ImageReference{
+		ConfigBytes: configBytes,
+	}
 }
 
 var _ = Describe("HasNoProhibitedLabelsCheck", func() {
@@ -48,10 +49,7 @@ var _ = Describe("HasNoProhibitedLabelsCheck", func() {
 	)
 
 	BeforeEach(func() {
-		fakeImage := fakecranev1.FakeImage{
-			ConfigFileStub: getProhibitedConfigFile,
-		}
-		imageRef.ImageInfo = &fakeImage
+		imageRef = createTestImageRefWithTrademarkLabels(false)
 	})
 
 	Describe("Checking for prohibited labels", func() {
@@ -64,10 +62,7 @@ var _ = Describe("HasNoProhibitedLabelsCheck", func() {
 		})
 		Context("When it has prohibited labels", func() {
 			BeforeEach(func() {
-				fakeImage := fakecranev1.FakeImage{
-					ConfigFileStub: getBadProhibitedConfigFile,
-				}
-				imageRef.ImageInfo = &fakeImage
+				imageRef = createTestImageRefWithTrademarkLabels(true)
 			})
 			It("should not pass Validate", func() {
 				ok, err := hasProhibitedLabelsCheck.Validate(context.TODO(), imageRef)

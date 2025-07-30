@@ -18,7 +18,7 @@ var _ check.Check = &HasNoProhibitedLabelsCheck{}
 type HasNoProhibitedLabelsCheck struct{}
 
 func (p *HasNoProhibitedLabelsCheck) Validate(ctx context.Context, imgRef image.ImageReference) (result bool, err error) {
-	labels, err := getContainerLabels(imgRef.ImageInfo)
+	labels, err := getContainerLabels(imgRef)
 	if err != nil {
 		return false, fmt.Errorf("could not retrieve image labels: %v", err)
 	}

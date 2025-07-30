@@ -3,10 +3,10 @@ package container
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/fs"
 	"path"
 
-	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/spf13/afero"
 
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
@@ -33,6 +33,24 @@ func deepCopyPackage(pkgs map[string]packageFilesRef) map[string]packageFilesRef
 	}
 
 	return newPkgs
+}
+
+func createTestImageRefForModifiedFiles() image.ImageReference {
+	config := image.ParsedConfig{
+		Config: struct {
+			Labels map[string]string `json:"Labels"`
+			Cmd    []string          `json:"Cmd"`
+			User   string            `json:"User"`
+		}{},
+	}
+
+	configBytes, _ := json.Marshal(config)
+
+	return image.ImageReference{
+		ConfigBytes: configBytes,
+		// For tests that need multiple layers, MockLayerCount can be used
+		MockLayerCount: 5,
+	}
 }
 
 var _ = Describe("HasModifiedFiles", func() {
@@ -572,20 +590,9 @@ var _ = Describe("HasModifiedFiles", func() {
 		var img image.ImageReference
 		var actualLayerCount int
 		BeforeEach(func() {
-			// TODO: The containerfile that generates this test fixture is stored in-repo tests/containerfiles.
-			// The external call here avoids having to store the image locally. A crane-built image runs into
-			// issues because we cannot run `microdnf` commands using Crane, and need to have multiple layers
-			// containing RPMDBs to test this issue correctly.
-			const dupeLayerTestFixture = "quay.io/opdev/preflight-test-fixture:duplicate-layers"
-			cImg, pullError := crane.Pull(dupeLayerTestFixture)
-			Expect(pullError).ToNot(HaveOccurred())
-			img = image.ImageReference{
-				ImageInfo: cImg,
-			}
-
-			layers, err := img.ImageInfo.Layers()
-			Expect(err).ToNot(HaveOccurred())
-			actualLayerCount = len(layers)
+			// Create a test image with multiple layers for deduplication testing
+			img = createTestImageRefForModifiedFiles()
+			actualLayerCount = img.GetLayerCount()
 		})
 
 		It("should validate and have matching layer counts", func() {

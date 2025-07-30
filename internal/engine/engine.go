@@ -36,19 +36,19 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/rpm"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/runtime"
 
-	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/cache"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/containers/image/v5/docker/reference"
+	"github.com/containers/image/v5/manifest"
+	"github.com/containers/image/v5/transports/alltransports"
+	"github.com/containers/image/v5/types"
 )
 
-// New creates a new CraneEngine from the passed params
+// New creates a new ContainersEngine from the passed params
 func New(ctx context.Context,
 	checks []check.Check,
 	kubeconfig []byte,
 	cfg runtime.Config,
-) (craneEngine, error) {
-	return craneEngine{
+) (containersEngine, error) {
+	return containersEngine{
 		kubeconfig:         kubeconfig,
 		dockerConfig:       cfg.DockerConfig,
 		image:              cfg.Image,
@@ -61,9 +61,9 @@ func New(ctx context.Context,
 	}, nil
 }
 
-// CraneEngine implements a certification.CheckEngine, and leverage crane to interact with
+// ContainersEngine implements a certification.CheckEngine, and leverage containers/image to interact with
 // the container registry and target image.
-type craneEngine struct {
+type containersEngine struct {
 	// Kubeconfig is a byte slice containing a valid Kubeconfig to be used by checks.
 	kubeconfig []byte
 	// DockerConfig is the credential required to pull the image.
@@ -85,7 +85,7 @@ type craneEngine struct {
 	isScratch bool
 
 	// Insecure controls whether to allow an insecure connection to
-	// the registry crane connects with.
+	// the registry we connect with.
 	insecure bool
 
 	// ManifestListDigest is the sha256 digest for the manifest list
@@ -95,31 +95,59 @@ type craneEngine struct {
 	results  certification.Results
 }
 
-func (c *craneEngine) CranePlatform() string {
+func (c *containersEngine) CranePlatform() string {
 	return c.platform
 }
 
-func (c *craneEngine) CraneDockerConfig() string {
+func (c *containersEngine) CraneDockerConfig() string {
 	return c.dockerConfig
 }
 
-func (c *craneEngine) CraneInsecure() bool {
+func (c *containersEngine) CraneInsecure() bool {
 	return c.insecure
 }
 
-var _ option.CraneConfig = &craneEngine{}
+var _ option.CraneConfig = &containersEngine{}
 
-func (c *craneEngine) ExecuteChecks(ctx context.Context) error {
+func (c *containersEngine) ExecuteChecks(ctx context.Context) error {
 	logger := logr.FromContextOrDiscard(ctx)
 	logger.Info("target image", "image", c.image)
 
-	// pull the image and save to fs
-	logger.V(log.DBG).Info("pulling image from target registry")
-	options := option.GenerateCraneOptions(ctx, c)
-	img, err := crane.Pull(c.image, options...)
-	if err != nil {
-		return fmt.Errorf("failed to pull remote container: %v", err)
+	// Set up the system context for image operations
+	sys := &types.SystemContext{
+		DockerInsecureSkipTLSVerify: types.NewOptionalBool(c.insecure),
 	}
+
+	if c.dockerConfig != "" {
+		sys.AuthFilePath = c.dockerConfig
+	}
+
+	// Parse the image reference
+	ref, err := alltransports.ParseImageName("docker://" + c.image)
+	if err != nil {
+		return fmt.Errorf("failed to parse image reference: %v", err)
+	}
+
+	// Create image source
+	src, err := ref.NewImageSource(ctx, sys)
+	if err != nil {
+		return fmt.Errorf("failed to create image source: %v", err)
+	}
+	defer src.Close()
+
+	// Get image manifest
+	manifestBytes, manifestType, err := src.GetManifest(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get image manifest: %v", err)
+	}
+
+	// Parse manifest
+	parsedManifest, err := manifest.FromBlob(manifestBytes, manifestType)
+	if err != nil {
+		return fmt.Errorf("failed to parse manifest: %v", err)
+	}
+
+	logger.V(log.DBG).Info("pulling image from target registry")
 
 	// create tmpdir to receive extracted fs
 	tmpdir, err := os.MkdirTemp(os.TempDir(), "preflight-*")
@@ -133,54 +161,81 @@ func (c *craneEngine) ExecuteChecks(ctx context.Context) error {
 		}
 	}()
 
-	imageTarPath := path.Join(tmpdir, "cache")
-	if err := os.Mkdir(imageTarPath, 0o755); err != nil {
-		return fmt.Errorf("failed to create cache directory: %s: %v", imageTarPath, err)
-	}
-
-	img = cache.Image(img, cache.NewFilesystemCache(imageTarPath))
-
 	containerFSPath := path.Join(tmpdir, "fs")
 	if err := os.Mkdir(containerFSPath, 0o755); err != nil {
 		return fmt.Errorf("failed to create container expansion directory: %s: %v", containerFSPath, err)
 	}
 
-	// Wrap this critical section in a closure to that we can close the
-	// mutate.Extract reader sooner than the end of the checks
-	if err := func() error {
-		// export/flatten, and extract
-		logger.V(log.DBG).Info("exporting and flattening image")
-		fs := mutate.Extract(img)
-		defer fs.Close()
-
-		logger.V(log.DBG).Info("extracting container filesystem", "path", containerFSPath)
-		if err := untar(ctx, containerFSPath, fs); err != nil {
-			return fmt.Errorf("failed to extract tarball: %v", err)
-		}
-
-		// explicitly discarding from the reader for cases where there is data in the reader after it sends an EOF
-		_, err = io.Copy(io.Discard, fs)
-		if err != nil {
-			return fmt.Errorf("failed to drain io reader: %v", err)
-		}
-		return nil
-	}(); err != nil {
-		return err
+	// Get config blob
+	configInfo := parsedManifest.ConfigInfo()
+	if configInfo.Digest == "" {
+		return fmt.Errorf("image has no config")
 	}
 
-	reference, err := name.ParseReference(c.image)
+	configBlob, size, err := src.GetBlob(ctx, configInfo, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get config blob: %v", err)
+	}
+	defer configBlob.Close()
+	_ = size // size is available but not used here
+
+	// Read config
+	configBytes, err := io.ReadAll(configBlob)
+	if err != nil {
+		return fmt.Errorf("failed to read config: %v", err)
+	}
+
+	// Extract filesystem layers
+	logger.V(log.DBG).Info("extracting container filesystem", "path", containerFSPath)
+	layerInfos := parsedManifest.LayerInfos()
+	for _, layerInfo := range layerInfos {
+		// Convert LayerInfo to BlobInfo
+		blobInfo := types.BlobInfo{
+			Digest:    layerInfo.Digest,
+			Size:      layerInfo.Size,
+			MediaType: layerInfo.MediaType,
+		}
+
+		layerBlob, _, err := src.GetBlob(ctx, blobInfo, nil)
+		if err != nil {
+			return fmt.Errorf("failed to get layer blob: %v", err)
+		}
+
+		if err := untar(ctx, containerFSPath, layerBlob); err != nil {
+			layerBlob.Close()
+			return fmt.Errorf("failed to extract layer: %v", err)
+		}
+		layerBlob.Close()
+	}
+
+	// Parse image reference for registry/repository info
+	parsedRef, err := reference.ParseNormalizedNamed(c.image)
 	if err != nil {
 		return fmt.Errorf("image uri could not be parsed: %v", err)
+	}
+
+	// Extract registry and repository from the reference
+	registry := reference.Domain(parsedRef)
+	repository := reference.Path(parsedRef)
+
+	// Extract tag or digest
+	var tagOrSha string
+	if tagged, ok := parsedRef.(reference.Tagged); ok {
+		tagOrSha = tagged.Tag()
+	} else if digested, ok := parsedRef.(reference.Digested); ok {
+		tagOrSha = digested.Digest().String()
 	}
 
 	// store the image internals in the engine image reference to pass to validations.
 	c.imageRef = image.ImageReference{
 		ImageURI:           c.image,
 		ImageFSPath:        containerFSPath,
-		ImageInfo:          img,
-		ImageRegistry:      reference.Context().RegistryStr(),
-		ImageRepository:    reference.Context().RepositoryStr(),
-		ImageTagOrSha:      reference.Identifier(),
+		ImageSource:        src,
+		Manifest:           parsedManifest,
+		ConfigBytes:        configBytes,
+		ImageRegistry:      registry,
+		ImageRepository:    repository,
+		ImageTagOrSha:      tagOrSha,
 		ManifestListDigest: c.manifestListDigest,
 	}
 
@@ -265,8 +320,8 @@ func (c *craneEngine) ExecuteChecks(ctx context.Context) error {
 		// By this point, we should have already resolved the digest so
 		// we don't handle this error, but fail safe and don't log a potentially
 		// incorrect line message to the user.
-		if resolvedDigest, err := c.imageRef.ImageInfo.Digest(); err == nil {
-			msg, warn := tagDigestBindingInfo(c.imageRef.ImageTagOrSha, resolvedDigest.String())
+		if configInfo := c.imageRef.Manifest.ConfigInfo(); configInfo.Digest != "" {
+			msg, warn := tagDigestBindingInfo(c.imageRef.ImageTagOrSha, configInfo.Digest.String())
 			if warn {
 				logger.Info(fmt.Sprintf("Warning: %s", msg))
 			} else {
@@ -360,7 +415,7 @@ func generateBundleHash(ctx context.Context, bundlePath string) (string, error) 
 }
 
 // Results will return the results of check execution.
-func (c *craneEngine) Results(ctx context.Context) certification.Results {
+func (c *containersEngine) Results(ctx context.Context) certification.Results {
 	return c.results
 }
 
@@ -497,60 +552,56 @@ func resolveLinkPaths(oldname, newname string) (string, string) {
 func writeCertImage(ctx context.Context, imageRef image.ImageReference) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	config, err := imageRef.ImageInfo.ConfigFile()
-	if err != nil {
-		return fmt.Errorf("failed to get image config file: %w", err)
+	// Parse the config bytes into a v1.ConfigFile structure
+	var config struct {
+		Architecture  string `json:"architecture"`
+		OS            string `json:"os"`
+		Created       string `json:"created"`
+		DockerVersion string `json:"docker_version"`
+		Config        struct {
+			Labels map[string]string `json:"Labels"`
+			Cmd    []string          `json:"Cmd"`
+		} `json:"config"`
+		RootFS struct {
+			DiffIDs []string `json:"diff_ids"`
+		} `json:"rootfs"`
 	}
 
-	manifest, err := imageRef.ImageInfo.Manifest()
-	if err != nil {
-		return fmt.Errorf("failed to get image manifest: %w", err)
+	if err := json.Unmarshal(imageRef.ConfigBytes, &config); err != nil {
+		return fmt.Errorf("failed to parse image config: %w", err)
 	}
 
-	digest, err := imageRef.ImageInfo.Digest()
-	if err != nil {
-		return fmt.Errorf("failed to get image digest: %w", err)
+	// Get manifest information
+	configInfo := imageRef.Manifest.ConfigInfo()
+	if configInfo.Digest == "" {
+		return fmt.Errorf("image has no config info")
 	}
 
-	rawConfig, err := imageRef.ImageInfo.RawConfigFile()
-	if err != nil {
-		return fmt.Errorf("failed to image raw config file: %w", err)
-	}
+	layerInfos := imageRef.Manifest.LayerInfos()
 
-	size, err := imageRef.ImageInfo.Size()
-	if err != nil {
-		return fmt.Errorf("failed to get image size: %w", err)
-	}
-
-	labels := convertLabels(config.Config.Labels)
-	layerSizes := make([]pyxis.Layer, 0, len(config.RootFS.DiffIDs))
-	for _, diffid := range config.RootFS.DiffIDs {
-		layer, err := imageRef.ImageInfo.LayerByDiffID(diffid)
-		if err != nil {
-			return fmt.Errorf("could not get layer by diff id: %w", err)
-		}
-
-		uncompressed, err := layer.Uncompressed()
-		if err != nil {
-			return fmt.Errorf("could not get uncompressed layer: %w", err)
-		}
-		written, err := io.Copy(io.Discard, uncompressed)
-		if err != nil {
-			return fmt.Errorf("could not copy from layer: %w", err)
+	// Calculate layer sizes - for now we'll use approximate sizes from the manifest
+	layerSizes := make([]pyxis.Layer, 0, len(layerInfos))
+	for i, layerInfo := range layerInfos {
+		var layerID string
+		if i < len(config.RootFS.DiffIDs) {
+			layerID = config.RootFS.DiffIDs[i]
+		} else {
+			layerID = layerInfo.Digest.String()
 		}
 
 		pyxisLayer := pyxis.Layer{
-			LayerID: diffid.String(),
-			Size:    written,
+			LayerID: layerID,
+			Size:    layerInfo.Size,
 		}
 		layerSizes = append(layerSizes, pyxisLayer)
 	}
 
-	manifestLayers := make([]string, 0, len(manifest.Layers))
-	for _, layer := range manifest.Layers {
+	manifestLayers := make([]string, 0, len(layerInfos))
+	for _, layer := range layerInfos {
 		manifestLayers = append(manifestLayers, layer.Digest.String())
 	}
 
+	labels := convertLabels(config.Config.Labels)
 	sumLayersSizeBytes := sumLayerSizeBytes(layerSizes)
 
 	addedDate := time.Now().UTC().Format(time.RFC3339)
@@ -570,29 +621,40 @@ func writeCertImage(ctx context.Context, imageRef image.ImageReference) error {
 		ManifestListDigest: imageRef.ManifestListDigest,
 	})
 
+	// Calculate total size by summing layer sizes
+	var totalSize int64
+	for _, layer := range layerInfos {
+		totalSize += layer.Size
+	}
+
+	var topLayerID string
+	if len(config.RootFS.DiffIDs) > 0 {
+		topLayerID = config.RootFS.DiffIDs[0]
+	}
+
 	certImage := pyxis.CertImage{
-		DockerImageDigest: digest.String(),
-		DockerImageID:     manifest.Config.Digest.String(),
-		ImageID:           digest.String(),
+		DockerImageDigest: configInfo.Digest.String(),
+		DockerImageID:     configInfo.Digest.String(),
+		ImageID:           configInfo.Digest.String(),
 		Architecture:      config.Architecture,
 		ParsedData: &pyxis.ParsedData{
 			Architecture:           config.Architecture,
 			Command:                strings.Join(config.Config.Cmd, " "),
-			Created:                config.Created.String(),
+			Created:                config.Created,
 			DockerVersion:          config.DockerVersion,
-			ImageID:                digest.String(),
+			ImageID:                configInfo.Digest.String(),
 			Labels:                 labels,
 			Layers:                 manifestLayers,
 			OS:                     config.OS,
-			Size:                   size,
+			Size:                   totalSize,
 			UncompressedLayerSizes: layerSizes,
 		},
-		RawConfig:         string(rawConfig),
+		RawConfig:         string(imageRef.ConfigBytes),
 		Repositories:      repositories,
 		SumLayerSizeBytes: sumLayersSizeBytes,
 		// This is an assumption that the DiffIDs are in order from base up.
 		// Need more evidence that this is always the case.
-		UncompressedTopLayerID: config.RootFS.DiffIDs[0].String(),
+		UncompressedTopLayerID: topLayerID,
 	}
 
 	// calling MarshalIndent so the json file written to disk is human-readable when opened
