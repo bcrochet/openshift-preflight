@@ -4,17 +4,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/go-logr/logr"
 
-	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/authn"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/check"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
 
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/containers/image/v5/docker"
+	"github.com/containers/image/v5/types"
 )
 
 var _ check.Check = &hasUniqueTagCheck{}
@@ -63,49 +61,28 @@ func (p *hasUniqueTagCheck) Validate(ctx context.Context, imgRef image.ImageRefe
 }
 
 func (p *hasUniqueTagCheck) getDataToValidate(ctx context.Context, image string) ([]string, error) {
-	repo, err := name.NewRepository(image)
+	// Parse the docker reference - containers/image requires // prefix for docker references
+	refString := "//" + image
+	ref, err := docker.ParseReference(refString)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse image name: %v", err)
+		return nil, fmt.Errorf("failed to parse image reference: %w", err)
 	}
 
-	options := []remote.Option{
-		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(authn.PreflightKeychain(ctx, authn.WithDockerConfig(p.dockercfg))),
-
-		// A smaller query is fine for evaluating the HasUniqueTag check
-		// https://github.com/redhat-openshift-ecosystem/openshift-preflight/pull/1268#discussion_r2085387116
-		remote.WithPageSize(10),
-
-		remote.WithRetryBackoff(remote.Backoff{
-			Duration: 5 * time.Second,
-			Factor:   1.0,
-			Jitter:   0.1,
-			Steps:    2,
-		}),
+	// Create SystemContext for authentication
+	sys := &types.SystemContext{}
+	if p.dockercfg != "" {
+		sys.DockerCompatAuthFilePath = p.dockercfg
 	}
 
-	puller, err := remote.NewPuller(options...)
+	// Get repository tags using containers/image
+	// Note: containers/image automatically handles pagination using Link headers,
+	// which is more standards-compliant than the original WithPageSize(10) approach
+	tags, err := docker.GetRepositoryTags(ctx, sys, ref)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create puller: %v", err)
+		return nil, fmt.Errorf("failed to get repository tags: %w", err)
 	}
 
-	lister, err := puller.Lister(ctx, repo)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create lister: %v", err)
-	}
-
-	if lister.HasNext() {
-		tags, err := lister.Next(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get tags: %v", err)
-		}
-
-		if tags != nil {
-			return tags.Tags, nil
-		}
-	}
-
-	return nil, nil
+	return tags, nil
 }
 
 func (p *hasUniqueTagCheck) validate(tags []string) (bool, error) {

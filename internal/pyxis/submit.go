@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
-	"github.com/google/go-containerregistry/pkg/name"
 )
 
-var defaultRegistryAlias = "docker.io"
+var (
+	defaultRegistryAlias = "docker.io"
+	// DefaultRegistry is the Docker Hub registry hostname (from go-containerregistry)
+	defaultRegistry = "index.docker.io"
+)
 
 // SubmitResults takes certInput and sends requests to Pyxis to create or update entries
 // based on certInput.
@@ -134,7 +136,7 @@ func (p *pyxisClient) SubmitResults(ctx context.Context, certInput *Certificatio
 // normalizeDockerRegistry sets registry to the value we get from certImage from crane and then normalizes
 // index.docker.io to docker.io so project/image info shows properly in the Red Hat Catalog and other backend systems (Clair)
 func normalizeDockerRegistry(registry string) string {
-	if registry == name.DefaultRegistry {
+	if registry == defaultRegistry {
 		registry = defaultRegistryAlias
 	}
 

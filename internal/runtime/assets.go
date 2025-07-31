@@ -8,11 +8,11 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/authn"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
 
-	"github.com/google/go-containerregistry/pkg/crane"
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/containers/image/v5/transports/alltransports"
+	"github.com/containers/image/v5/types"
+	"github.com/containers/image/v5/manifest"
 )
 
 // images maps the images use by preflight with their purpose.
@@ -28,27 +28,52 @@ var images = map[string]string{
 // the image URIs.
 func imageList(ctx context.Context) []string {
 	logger := logr.FromContextOrDiscard(ctx)
-	options := []crane.Option{
-		crane.WithContext(ctx),
-		crane.WithAuthFromKeychain(authn.PreflightKeychain(ctx)),
-		crane.WithPlatform(&cranev1.Platform{
-			OS: "linux",
-			// This remains the runtime arch, as we don't specify the arch for operators
-			Architecture: goruntime.GOARCH,
-		}),
+	
+	// Create system context for containers/image
+	sys := &types.SystemContext{
+		ArchitectureChoice: goruntime.GOARCH,
+		OSChoice:           "linux",
 	}
 
 	imageList := make([]string, 0, len(images))
 
 	for _, image := range images {
 		base := strings.Split(image, ":")[0]
-		digest, err := crane.Digest(image, options...)
+		
+		// Parse image reference
+		imageRef := image
+		if !strings.HasPrefix(imageRef, "docker://") {
+			imageRef = "docker://" + imageRef
+		}
+		ref, err := alltransports.ParseImageName(imageRef)
 		if err != nil {
-			logger.Error(fmt.Errorf("could not retrieve image digest: %w", err), "crane error")
-			// Skip this entry
+			logger.Error(fmt.Errorf("could not parse image reference: %w", err), "image reference error")
 			continue
 		}
-		imageList = append(imageList, fmt.Sprintf("%s@%s", base, digest))
+		
+		// Get image source and manifest to calculate digest
+		src, err := ref.NewImageSource(ctx, sys)
+		if err != nil {
+			logger.Error(fmt.Errorf("could not create image source: %w", err), "image source error")
+			continue
+		}
+		
+		manifestBytes, _, err := src.GetManifest(ctx, nil)
+		if err != nil {
+			src.Close()
+			logger.Error(fmt.Errorf("could not get manifest: %w", err), "manifest error")
+			continue
+		}
+		src.Close()
+		
+		// Calculate manifest digest
+		digest, err := manifest.Digest(manifestBytes)
+		if err != nil {
+			logger.Error(fmt.Errorf("could not calculate manifest digest: %w", err), "digest error")
+			continue
+		}
+		
+		imageList = append(imageList, fmt.Sprintf("%s@%s", base, digest.String()))
 	}
 
 	return imageList
