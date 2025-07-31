@@ -28,7 +28,6 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/openshift"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/operatorsdk"
-	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/option"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/policy"
 	containerpol "github.com/redhat-openshift-ecosystem/openshift-preflight/internal/policy/container"
 	operatorpol "github.com/redhat-openshift-ecosystem/openshift-preflight/internal/policy/operator"
@@ -95,19 +94,7 @@ type containersEngine struct {
 	results  certification.Results
 }
 
-func (c *containersEngine) CranePlatform() string {
-	return c.platform
-}
 
-func (c *containersEngine) CraneDockerConfig() string {
-	return c.dockerConfig
-}
-
-func (c *containersEngine) CraneInsecure() bool {
-	return c.insecure
-}
-
-var _ option.CraneConfig = &containersEngine{}
 
 func (c *containersEngine) ExecuteChecks(ctx context.Context) error {
 	logger := logr.FromContextOrDiscard(ctx)
