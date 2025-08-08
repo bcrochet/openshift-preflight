@@ -10,7 +10,7 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/pyxis"
 
 	"github.com/go-logr/logr"
-	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/containers/image/v5/docker/reference"
 	mimage "github.com/operator-framework/operator-manifest-tools/pkg/image"
 	"github.com/operator-framework/operator-manifest-tools/pkg/pullspec"
 )
@@ -61,13 +61,23 @@ func (p *certifiedImagesCheck) dataToValidate(ctx context.Context, imagePath str
 
 	imageDigests := make([]string, 0, len(imageNames))
 	for _, img := range imageNames {
-		digest, err := name.NewDigest(img)
+		// Parse the image reference to extract digest
+		named, err := reference.ParseNormalizedNamed(img)
 		if err != nil {
 			logger.Error(err, "image does not appear to be pinned", "image", img)
 			p.nonCertifiedImages = append(p.nonCertifiedImages, img)
 			continue
 		}
-		imageDigests = append(imageDigests, digest.DigestStr())
+		
+		// Check if it's a digest reference (has digest)
+		digested, ok := named.(reference.Digested)
+		if !ok {
+			logger.Error(fmt.Errorf("image is not pinned to digest"), "image does not appear to be pinned", "image", img)
+			p.nonCertifiedImages = append(p.nonCertifiedImages, img)
+			continue
+		}
+		
+		imageDigests = append(imageDigests, digested.Digest().String())
 	}
 
 	return imageDigests, nil

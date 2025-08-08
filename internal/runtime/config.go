@@ -4,7 +4,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/option"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/policy"
 
 	"github.com/spf13/viper"
@@ -92,17 +91,3 @@ func (c *Config) storeOperatorPolicyConfiguration(vcfg viper.Viper) {
 	c.SubscriptionTimeout = vcfg.GetDuration("subscription_timeout")
 }
 
-// This is to satisfy the CraneConfig interface
-func (c *Config) CraneDockerConfig() string {
-	return c.DockerConfig
-}
-
-func (c *Config) CranePlatform() string {
-	return c.Platform
-}
-
-func (c *Config) CraneInsecure() bool {
-	return c.Insecure
-}
-
-var _ option.CraneConfig = &Config{}

@@ -8,7 +8,6 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 
 	"github.com/go-logr/logr"
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 var _ check.Check = &RunAsNonRootCheck{}
@@ -18,7 +17,7 @@ var _ check.Check = &RunAsNonRootCheck{}
 type RunAsNonRootCheck struct{}
 
 func (p *RunAsNonRootCheck) Validate(ctx context.Context, imgRef image.ImageReference) (bool, error) {
-	user, err := p.getDataToValidate(imgRef.ImageInfo)
+	user, err := p.getDataToValidate(imgRef)
 	if err != nil {
 		return false, fmt.Errorf("could not get validation data: %v", err)
 	}
@@ -26,12 +25,12 @@ func (p *RunAsNonRootCheck) Validate(ctx context.Context, imgRef image.ImageRefe
 	return p.validate(ctx, user)
 }
 
-func (p *RunAsNonRootCheck) getDataToValidate(image cranev1.Image) (string, error) {
-	configFile, err := image.ConfigFile()
+func (p *RunAsNonRootCheck) getDataToValidate(imgRef image.ImageReference) (string, error) {
+	config, err := imgRef.GetConfig()
 	if err != nil {
-		return "", fmt.Errorf("could not retrieve ConfigFile from Image: %w", err)
+		return "", fmt.Errorf("could not retrieve config from Image: %w", err)
 	}
-	return configFile.Config.User, nil
+	return config.Config.User, nil
 }
 
 func (p *RunAsNonRootCheck) validate(ctx context.Context, user string) (bool, error) {
