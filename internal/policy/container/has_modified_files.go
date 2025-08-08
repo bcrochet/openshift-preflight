@@ -1,9 +1,12 @@
 package container
 
 import (
+	"archive/tar"
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,13 +16,17 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/check"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
+	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/rpm"
 
+	"github.com/containers/image/v5/types"
 	"github.com/go-logr/logr"
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 	"github.com/spf13/afero"
 )
 
 var _ check.Check = &HasModifiedFilesCheck{}
+
+const whiteoutPrefix = ".wh."
 
 // HasModifiedFilesCheck evaluates that no files from the base layer have been modified by
 // subsequent layers by comparing the file list installed by Packages against the file list
@@ -160,11 +167,19 @@ func (p *HasModifiedFilesCheck) gatherDataToValidate(ctx context.Context, imgRef
 
 		layerIDs = append(layerIDs, layerID)
 
-		// For now, skip layer processing until we implement the blob-based functions
-		// TODO: Implement generateChangesForBlob and findRPMDBInBlob
-		files := make(map[string]fileInfo)
-		found := false
-		pkgList := make([]*rpmdb.PackageInfo, 0)
+		// Convert layerInfo to BlobInfo for containers/image API
+		blobInfo := types.BlobInfo{
+			Digest:    layerInfo.Digest,
+			Size:      layerInfo.Size,
+			MediaType: layerInfo.MediaType,
+		}
+
+		files, err := generateChangesFor(ctx, imgRef.ImageSource, blobInfo)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		found, pkgList := findRPMDB(ctx, imgRef.ImageSource, blobInfo)
 		if !found {
 			logger.V(log.TRC).Info("could not find rpm database in layer", "layer", layerID)
 			if idx > 0 {
@@ -475,4 +490,176 @@ func installedFileMapWithExclusions(ctx context.Context, pkglist []*rpmdb.Packag
 
 type fileInfo struct {
 	Mode os.FileMode
+}
+
+// generateChangesFor will check layer for file changes using containers/image blob API
+func generateChangesFor(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) (map[string]fileInfo, error) {
+	logger := logr.FromContextOrDiscard(ctx)
+	
+	// Get the blob for this layer
+	blob, _, err := imgSrc.GetBlob(ctx, layerInfo, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reading layer blob: %w", err)
+	}
+	defer blob.Close()
+
+	tarReader := tar.NewReader(blob)
+	// Use a map so we can remove items easily
+	filelist := make(map[string]fileInfo)
+	var links []string
+	
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading tar: %w", err)
+		}
+
+		// Some tools prepend everything with "./", so if we don't Clean the
+		// name, we may have duplicate entries, which angers tar-split.
+		header.Name = filepath.Clean(header.Name)
+		// force PAX format to remove Name/Linkname length limit of 100 characters
+		// required by USTAR and to not depend on internal tar package guess which
+		// prefers USTAR over PAX
+		header.Format = tar.FormatPAX
+
+		basename := filepath.Base(header.Name)
+		dirname := filepath.Dir(header.Name)
+		tombstone := strings.HasPrefix(basename, whiteoutPrefix)
+		if tombstone {
+			basename = basename[len(whiteoutPrefix):]
+		}
+
+		// If there is a capability entry, ignore the file
+		if _, found := header.PAXRecords["SCHILY.xattr.security.capability"]; found {
+			logger.V(log.TRC).Info("security capabilities found in layer tar, ignoring file", "file", header.Name)
+			continue
+		}
+
+		switch {
+		case (header.Typeflag == tar.TypeDir && tombstone) || header.Typeflag == tar.TypeReg:
+			filelist[strings.TrimPrefix(filepath.Join(dirname, basename), "/")] = fileInfo{header.FileInfo().Mode()}
+		case header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeLink:
+			filelist[strings.TrimPrefix(header.Name, "/")] = fileInfo{header.FileInfo().Mode()}
+			// Add the target to the links slice so we can remove them later
+			links = append(links, strings.TrimPrefix(header.Linkname, "/"))
+		default:
+			// TODO: what do we do with other flags?
+			continue
+		}
+	}
+
+	// We have to process these after the fact, as the link could have come before
+	// the target in the tarball
+	// As it stands now, this really only works for links that the target is a fully
+	// qualified path. If the link was relative, this probably doesn't work.
+	for _, link := range links {
+		delete(filelist, link)
+	}
+
+	return filelist, nil
+}
+
+// findRPMDB attempts to extract a valid RPMDB from layers using containers/image blob API
+func findRPMDB(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) (found bool, pkglist []*rpmdb.PackageInfo) {
+	logger := logr.FromContextOrDiscard(ctx)
+	var err error
+	pkglist, err = extractRPMDB(ctx, imgSrc, layerInfo)
+	if err == nil {
+		logger.V(log.TRC).Info("findRPMDB found an RPM db", "layer", layerInfo.Digest.String())
+		found = true
+		return
+	}
+
+	return found, pkglist
+}
+
+// extractRPMDB copies /var/lib/rpm/* from the layer blob and derives a list of packages
+func extractRPMDB(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) ([]*rpmdb.PackageInfo, error) {
+	// Get the blob for this layer
+	blob, _, err := imgSrc.GetBlob(ctx, layerInfo, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reading layer blob: %w", err)
+	}
+	defer blob.Close()
+
+	fs := afero.NewOsFs()
+	basepath, err := afero.TempDir(fs, "", "rpmdb")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = fs.RemoveAll(basepath)
+	}()
+
+	tarReader := tar.NewReader(blob)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading tar: %w", err)
+		}
+
+		// Some tools prepend everything with "./", so if we don't Clean the
+		// name, we may have duplicate entries, which angers tar-split.
+		header.Name = filepath.Clean(header.Name)
+		header.Format = tar.FormatPAX
+		rpmdirname := "var/lib/rpm"
+		basename := filepath.Base(header.Name)
+		dirname := filepath.Dir(header.Name)
+		tombstone := strings.HasPrefix(basename, whiteoutPrefix)
+
+		// Not a file or directory? Continue...
+		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		// Tombstone? Ignore...
+		if tombstone {
+			continue
+		}
+
+		// Not in the RPM directory. Ignore...
+		if !strings.HasPrefix(filepath.Join(dirname, basename), rpmdirname) {
+			continue
+		}
+		
+		// a dir or file with the correct var/lib/rpm prefix that has not been marked with a tombstone is valid.
+		if header.Typeflag == tar.TypeDir {
+			err := os.MkdirAll(filepath.Join(basepath, dirname, basename), header.FileInfo().Mode())
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		f, err := fs.OpenFile(filepath.Join(basepath, dirname, basename), os.O_RDWR|os.O_CREATE|os.O_TRUNC, header.FileInfo().Mode())
+		if err != nil {
+			return nil, err
+		}
+		err = func() error {
+			// closure here allows us to defer f.Close() in this iteration instead of
+			// waiting for the parent function to complete.
+			defer f.Close()
+			_, err := io.Copy(f, tarReader)
+			if err != nil {
+				return err
+			}
+			return nil
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	packageList, err := rpm.GetPackageList(ctx, basepath)
+	if err != nil {
+		return nil, err
+	}
+
+	return packageList, nil
 }
