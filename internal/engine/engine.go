@@ -39,6 +39,7 @@ import (
 	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
+	"github.com/opencontainers/go-digest"
 )
 
 // New creates a new ContainersEngine from the passed params
@@ -564,6 +565,25 @@ func writeCertImage(ctx context.Context, imageRef image.ImageReference) error {
 		return fmt.Errorf("image has no config info")
 	}
 
+	// Calculate the manifest digest (not config digest) for Pyxis API compatibility
+	var manifestDigest digest.Digest
+	if imageRef.ImageSource != nil {
+		manifestBytes, _, err := imageRef.ImageSource.GetManifest(ctx, nil)
+		if err != nil {
+			logger.V(log.DBG).Info("unable to get manifest bytes, falling back to config digest", "error", err)
+			manifestDigest = configInfo.Digest
+		} else {
+			manifestDigest, err = manifest.Digest(manifestBytes)
+			if err != nil {
+				logger.V(log.DBG).Info("unable to calculate manifest digest, falling back to config digest", "error", err)
+				manifestDigest = configInfo.Digest
+			}
+		}
+	} else {
+		// Fallback for cases where ImageSource is not available (e.g., tests)
+		manifestDigest = configInfo.Digest
+	}
+
 	layerInfos := imageRef.Manifest.LayerInfos()
 
 	// Calculate layer sizes - for now we'll use approximate sizes from the manifest
@@ -620,16 +640,16 @@ func writeCertImage(ctx context.Context, imageRef image.ImageReference) error {
 	}
 
 	certImage := pyxis.CertImage{
-		DockerImageDigest: configInfo.Digest.String(),
+		DockerImageDigest: manifestDigest.String(),
 		DockerImageID:     configInfo.Digest.String(),
-		ImageID:           configInfo.Digest.String(),
+		ImageID:           manifestDigest.String(),
 		Architecture:      config.Architecture,
 		ParsedData: &pyxis.ParsedData{
 			Architecture:           config.Architecture,
 			Command:                strings.Join(config.Config.Cmd, " "),
 			Created:                config.Created,
 			DockerVersion:          config.DockerVersion,
-			ImageID:                configInfo.Digest.String(),
+			ImageID:                manifestDigest.String(),
 			Labels:                 labels,
 			Layers:                 manifestLayers,
 			OS:                     config.OS,
