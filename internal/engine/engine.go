@@ -32,6 +32,7 @@ import (
 	containerpol "github.com/redhat-openshift-ecosystem/openshift-preflight/internal/policy/container"
 	operatorpol "github.com/redhat-openshift-ecosystem/openshift-preflight/internal/policy/operator"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/pyxis"
+	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/retry"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/rpm"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/runtime"
 
@@ -116,15 +117,19 @@ func (c *containersEngine) ExecuteChecks(ctx context.Context) error {
 		return fmt.Errorf("failed to parse image reference: %v", err)
 	}
 
-	// Create image source
-	src, err := ref.NewImageSource(ctx, sys)
+	// Create image source with retry logic
+	src, err := retry.WithRetry(ctx, func() (types.ImageSource, error) {
+		return ref.NewImageSource(ctx, sys)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create image source: %v", err)
 	}
 	defer src.Close()
 
-	// Get image manifest
-	manifestBytes, manifestType, err := src.GetManifest(ctx, nil)
+	// Get image manifest with retry logic
+	manifestBytes, manifestType, err := retry.WithRetry2(ctx, func() ([]byte, string, error) {
+		return src.GetManifest(ctx, nil)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get image manifest: %v", err)
 	}
@@ -160,7 +165,9 @@ func (c *containersEngine) ExecuteChecks(ctx context.Context) error {
 		return fmt.Errorf("image has no config")
 	}
 
-	configBlob, size, err := src.GetBlob(ctx, configInfo, nil)
+	configBlob, size, err := retry.WithRetry2(ctx, func() (io.ReadCloser, int64, error) {
+		return src.GetBlob(ctx, configInfo, nil)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get config blob: %v", err)
 	}
@@ -184,7 +191,9 @@ func (c *containersEngine) ExecuteChecks(ctx context.Context) error {
 			MediaType: layerInfo.MediaType,
 		}
 
-		layerBlob, _, err := src.GetBlob(ctx, blobInfo, nil)
+		layerBlob, _, err := retry.WithRetry2(ctx, func() (io.ReadCloser, int64, error) {
+			return src.GetBlob(ctx, blobInfo, nil)
+		})
 		if err != nil {
 			return fmt.Errorf("failed to get layer blob: %v", err)
 		}
@@ -568,7 +577,9 @@ func writeCertImage(ctx context.Context, imageRef image.ImageReference) error {
 	// Calculate the manifest digest (not config digest) for Pyxis API compatibility
 	var manifestDigest digest.Digest
 	if imageRef.ImageSource != nil {
-		manifestBytes, _, err := imageRef.ImageSource.GetManifest(ctx, nil)
+		manifestBytes, _, err := retry.WithRetry2(ctx, func() ([]byte, string, error) {
+			return imageRef.ImageSource.GetManifest(ctx, nil)
+		})
 		if err != nil {
 			logger.V(log.DBG).Info("unable to get manifest bytes, falling back to config digest", "error", err)
 			manifestDigest = configInfo.Digest

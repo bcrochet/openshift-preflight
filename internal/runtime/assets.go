@@ -9,6 +9,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
+	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/retry"
 
 	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
@@ -26,13 +27,18 @@ var images = map[string]string{
 
 // imageList takes the images mapping and represents them using just
 // the image URIs.
-func imageList(ctx context.Context) []string {
+func imageList(ctx context.Context, dockerConfig string) []string {
 	logger := logr.FromContextOrDiscard(ctx)
 	
 	// Create system context for containers/image
 	sys := &types.SystemContext{
 		ArchitectureChoice: goruntime.GOARCH,
 		OSChoice:           "linux",
+	}
+	
+	// Set up authentication if docker config is provided
+	if dockerConfig != "" {
+		sys.AuthFilePath = dockerConfig
 	}
 
 	imageList := make([]string, 0, len(images))
@@ -51,14 +57,25 @@ func imageList(ctx context.Context) []string {
 			continue
 		}
 		
-		// Get image source and manifest to calculate digest
-		src, err := ref.NewImageSource(ctx, sys)
+		// Create a copy of system context for this image
+		imageSys := *sys
+		// Allow insecure connections for localhost/testing registries
+		if strings.Contains(base, "127.0.0.1") || strings.Contains(base, "localhost") {
+			imageSys.DockerInsecureSkipTLSVerify = types.NewOptionalBool(true)
+		}
+		
+		// Get image source and manifest to calculate digest with retry logic
+		src, err := retry.WithRetry(ctx, func() (types.ImageSource, error) {
+			return ref.NewImageSource(ctx, &imageSys)
+		})
 		if err != nil {
 			logger.Error(fmt.Errorf("could not create image source: %w", err), "image source error")
 			continue
 		}
 		
-		manifestBytes, _, err := src.GetManifest(ctx, nil)
+		manifestBytes, _, err := retry.WithRetry2(ctx, func() ([]byte, string, error) {
+			return src.GetManifest(ctx, nil)
+		})
 		if err != nil {
 			src.Close()
 			logger.Error(fmt.Errorf("could not get manifest: %w", err), "manifest error")
@@ -82,7 +99,14 @@ func imageList(ctx context.Context) []string {
 // Assets returns a full collection of assets used in Preflight.
 func Assets(ctx context.Context) AssetData {
 	return AssetData{
-		Images: imageList(ctx),
+		Images: imageList(ctx, ""),
+	}
+}
+
+// AssetsWithAuth returns a full collection of assets used in Preflight with authentication.
+func AssetsWithAuth(ctx context.Context, dockerConfig string) AssetData {
+	return AssetData{
+		Images: imageList(ctx, dockerConfig),
 	}
 }
 

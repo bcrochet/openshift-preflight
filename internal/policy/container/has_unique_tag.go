@@ -10,6 +10,7 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/check"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
+	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/retry"
 
 	"github.com/containers/image/v5/docker"
 	"github.com/containers/image/v5/types"
@@ -73,11 +74,18 @@ func (p *hasUniqueTagCheck) getDataToValidate(ctx context.Context, image string)
 	if p.dockercfg != "" {
 		sys.DockerCompatAuthFilePath = p.dockercfg
 	}
+	
+	// Allow insecure connections for localhost/testing registries
+	if strings.Contains(image, "127.0.0.1") || strings.Contains(image, "localhost") {
+		sys.DockerInsecureSkipTLSVerify = types.NewOptionalBool(true)
+	}
 
-	// Get repository tags using containers/image
+	// Get repository tags using containers/image with retry logic
 	// Note: containers/image automatically handles pagination using Link headers,
 	// which is more standards-compliant than the original WithPageSize(10) approach
-	tags, err := docker.GetRepositoryTags(ctx, sys, ref)
+	tags, err := retry.WithRetry(ctx, func() ([]string, error) {
+		return docker.GetRepositoryTags(ctx, sys, ref)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get repository tags: %w", err)
 	}

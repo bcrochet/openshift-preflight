@@ -16,6 +16,7 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/check"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
+	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/retry"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/rpm"
 
 	"github.com/containers/image/v5/types"
@@ -496,8 +497,10 @@ type fileInfo struct {
 func generateChangesFor(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) (map[string]fileInfo, error) {
 	logger := logr.FromContextOrDiscard(ctx)
 	
-	// Get the blob for this layer
-	blob, _, err := imgSrc.GetBlob(ctx, layerInfo, nil)
+	// Get the blob for this layer with retry logic
+	blob, _, err := retry.WithRetry2(ctx, func() (io.ReadCloser, int64, error) {
+		return imgSrc.GetBlob(ctx, layerInfo, nil)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("reading layer blob: %w", err)
 	}
@@ -578,8 +581,10 @@ func findRPMDB(ctx context.Context, imgSrc types.ImageSource, layerInfo types.Bl
 
 // extractRPMDB copies /var/lib/rpm/* from the layer blob and derives a list of packages
 func extractRPMDB(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) ([]*rpmdb.PackageInfo, error) {
-	// Get the blob for this layer
-	blob, _, err := imgSrc.GetBlob(ctx, layerInfo, nil)
+	// Get the blob for this layer with retry logic
+	blob, _, err := retry.WithRetry2(ctx, func() (io.ReadCloser, int64, error) {
+		return imgSrc.GetBlob(ctx, layerInfo, nil)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("reading layer blob: %w", err)
 	}
