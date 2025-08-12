@@ -2,27 +2,37 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/pyxis"
 
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
-	fakecranev1 "github.com/google/go-containerregistry/pkg/v1/fake"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/opencontainers/go-digest"
 )
 
-func ConfigFile() (*cranev1.ConfigFile, error) {
-	return &cranev1.ConfigFile{
-		Config: cranev1.Config{},
-	}, nil
+func createBasicTestImageRef() image.ImageReference {
+	config := image.ParsedConfig{
+		Config: struct {
+			Labels map[string]string `json:"Labels"`
+			Cmd    []string          `json:"Cmd"`
+			User   string            `json:"User"`
+		}{},
+	}
+
+	configBytes, _ := json.Marshal(config)
+
+	return image.ImageReference{
+		ConfigBytes: configBytes,
+	}
 }
 
 type fakeLayerHashChecker struct{}
 
-func (flhc *fakeLayerHashChecker) CertifiedImagesContainingLayers(ctx context.Context, layers []cranev1.Hash) ([]pyxis.CertImage, error) {
+func (flhc *fakeLayerHashChecker) CertifiedImagesContainingLayers(ctx context.Context, layers []digest.Digest) ([]pyxis.CertImage, error) {
 	var matchingImages []pyxis.CertImage
 	matchingImages = append(matchingImages, pyxis.CertImage{})
 	return matchingImages, nil
@@ -30,14 +40,14 @@ func (flhc *fakeLayerHashChecker) CertifiedImagesContainingLayers(ctx context.Co
 
 type fakeLayerHashCheckerNoMatch struct{}
 
-func (flhc *fakeLayerHashCheckerNoMatch) CertifiedImagesContainingLayers(ctx context.Context, layers []cranev1.Hash) ([]pyxis.CertImage, error) {
+func (flhc *fakeLayerHashCheckerNoMatch) CertifiedImagesContainingLayers(ctx context.Context, layers []digest.Digest) ([]pyxis.CertImage, error) {
 	var matchingImages []pyxis.CertImage
 	return matchingImages, nil
 }
 
 type fakeLayerHashCheckerTimeout struct{}
 
-func (flhc *fakeLayerHashCheckerTimeout) CertifiedImagesContainingLayers(ctx context.Context, layers []cranev1.Hash) ([]pyxis.CertImage, error) {
+func (flhc *fakeLayerHashCheckerTimeout) CertifiedImagesContainingLayers(ctx context.Context, layers []digest.Digest) ([]pyxis.CertImage, error) {
 	return nil, http.ErrHandlerTimeout
 }
 
@@ -48,10 +58,7 @@ var _ = Describe("BaseOnUBI", func() {
 	)
 
 	BeforeEach(func() {
-		fakeImage := fakecranev1.FakeImage{
-			ConfigFileStub: ConfigFile,
-		}
-		imageRef.ImageInfo = &fakeImage
+		imageRef = createBasicTestImageRef()
 	})
 	AfterEach(func() {
 		os.RemoveAll(imageRef.ImageFSPath)

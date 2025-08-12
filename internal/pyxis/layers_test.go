@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
 	. "github.com/onsi/ginkgo/v2/dsl/core"
 	. "github.com/onsi/gomega"
+	"github.com/opencontainers/go-digest"
 )
 
 var _ = Describe("Pyxis CheckRedHatLayers", func() {
@@ -21,7 +21,9 @@ var _ = Describe("Pyxis CheckRedHatLayers", func() {
 		})
 		Context("and a layer is a known good layer", func() {
 			It("should be a good layer", func() {
-				certImages, err := pyxisClient.CertifiedImagesContainingLayers(ctx, []cranev1.Hash{{}})
+				// Create a test digest
+				testDigest := digest.FromString("test-layer")
+				certImages, err := pyxisClient.CertifiedImagesContainingLayers(ctx, []digest.Digest{testDigest})
 				Expect(err).ToNot(HaveOccurred())
 				Expect(certImages).ToNot(BeNil())
 				Expect(certImages).ToNot(BeZero())

@@ -2,37 +2,30 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
-	fakecranev1 "github.com/google/go-containerregistry/pkg/v1/fake"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 )
 
-func userConfigFile(user string) (*cranev1.ConfigFile, error) {
-	return &cranev1.ConfigFile{
-		Config: cranev1.Config{
+func createTestImageRefWithUser(user string) image.ImageReference {
+	config := image.ParsedConfig{
+		Config: struct {
+			Labels map[string]string `json:"Labels"`
+			Cmd    []string          `json:"Cmd"`
+			User   string            `json:"User"`
+		}{
 			User: user,
 		},
-	}, nil
-}
+	}
 
-func configFileWithEmptyUser() (*cranev1.ConfigFile, error) {
-	return userConfigFile("")
-}
+	configBytes, _ := json.Marshal(config)
 
-func configFileWithGoodUser() (*cranev1.ConfigFile, error) {
-	return userConfigFile("1000")
-}
-
-func configFileWithRootUID() (*cranev1.ConfigFile, error) {
-	return userConfigFile("0")
-}
-
-func configFileWithRootUsername() (*cranev1.ConfigFile, error) {
-	return userConfigFile("root")
+	return image.ImageReference{
+		ConfigBytes: configBytes,
+	}
 }
 
 var _ = Describe("RunAsNonRoot", func() {
@@ -42,10 +35,7 @@ var _ = Describe("RunAsNonRoot", func() {
 	)
 
 	BeforeEach(func() {
-		fakeImage := fakecranev1.FakeImage{
-			ConfigFileStub: configFileWithGoodUser,
-		}
-		imageRef.ImageInfo = &fakeImage
+		imageRef = createTestImageRefWithUser("1000")
 	})
 
 	Describe("Checking manifest user is not root", func() {
@@ -60,10 +50,7 @@ var _ = Describe("RunAsNonRoot", func() {
 	Describe("Checking manifest user is root", func() {
 		Context("When manifest user is empty", func() {
 			BeforeEach(func() {
-				fakeImage := fakecranev1.FakeImage{
-					ConfigFileStub: configFileWithEmptyUser,
-				}
-				imageRef.ImageInfo = &fakeImage
+				imageRef = createTestImageRefWithUser("")
 			})
 			It("should not pass Validate", func() {
 				ok, err := runAsNonRoot.Validate(context.TODO(), imageRef)
@@ -73,10 +60,7 @@ var _ = Describe("RunAsNonRoot", func() {
 		})
 		Context("When manifest user is string root", func() {
 			BeforeEach(func() {
-				fakeImage := fakecranev1.FakeImage{
-					ConfigFileStub: configFileWithRootUsername,
-				}
-				imageRef.ImageInfo = &fakeImage
+				imageRef = createTestImageRefWithUser("root")
 			})
 			It("should not pass Validate", func() {
 				ok, err := runAsNonRoot.Validate(context.TODO(), imageRef)
@@ -86,10 +70,7 @@ var _ = Describe("RunAsNonRoot", func() {
 		})
 		Context("When manifest user is UID 0", func() {
 			BeforeEach(func() {
-				fakeImage := fakecranev1.FakeImage{
-					ConfigFileStub: configFileWithRootUID,
-				}
-				imageRef.ImageInfo = &fakeImage
+				imageRef = createTestImageRefWithUser("0")
 			})
 			It("should not pass Validate", func() {
 				ok, err := runAsNonRoot.Validate(context.TODO(), imageRef)

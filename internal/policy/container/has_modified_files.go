@@ -16,22 +16,23 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/check"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
+	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/retry"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/rpm"
 
+	"github.com/containers/image/v5/types"
 	"github.com/go-logr/logr"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 	"github.com/spf13/afero"
 )
 
 var _ check.Check = &HasModifiedFilesCheck{}
 
+const whiteoutPrefix = ".wh."
+
 // HasModifiedFilesCheck evaluates that no files from the base layer have been modified by
 // subsequent layers by comparing the file list installed by Packages against the file list
 // modified in subsequent layers.
 type HasModifiedFilesCheck struct{}
-
-const whiteoutPrefix = ".wh."
 
 type packageMeta struct {
 	Name        string
@@ -121,35 +122,35 @@ func (p *HasModifiedFilesCheck) gatherDataToValidate(ctx context.Context, imgRef
 		_ = fs.RemoveAll(layerDir)
 	}()
 
-	if imgRef.ImageInfo == nil {
+	if imgRef.ImageSource == nil {
 		return nil, nil, fmt.Errorf("image reference invalid")
 	}
 
-	layers, err := imgRef.ImageInfo.Layers()
-	if err != nil {
-		return nil, nil, err
-	}
+	// Get layer information from manifest
+	layerInfos := imgRef.Manifest.LayerInfos()
 
-	layerIDs := make([]string, 0, len(layers))
-	layerRefs := make(map[string]packageFilesRef, len(layers))
+	layerIDs := make([]string, 0, len(layerInfos))
+	layerRefs := make(map[string]packageFilesRef, len(layerInfos))
+
+	// Get diff IDs from the config for debugging
+	diffIDs, err := imgRef.GetLayerDiffIDs()
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to get layer diff IDs: %w", err)
+	}
 
 	// Uncompress each layer and build maps containing the packages,
 	// the package files, and the files modified by each layer
 	// Also generate a list of the layerIDs so we can keep the
 	// order within the maps.
-	for idx, layer := range layers {
-		layerIDHash, err := layer.Digest()
-		if err != nil {
-			return nil, nil, fmt.Errorf("unable to retrieve diff id for layer: %w", err)
-		}
+	for idx, layerInfo := range layerInfos {
+		layerIDHash := layerInfo.Digest
 
 		// Capture the diff ID to aid in debugging. We don't technically care if
 		// there's an error returned here because we don't use the layerDiffID
 		// value for anything meaningful.
 		layerDiffID := "unknown"
-		layerDiffHash, err := layer.DiffID()
-		if err == nil && layerDiffHash.String() != "" {
-			layerDiffID = layerDiffHash.String()
+		if idx < len(diffIDs) {
+			layerDiffID = diffIDs[idx].String()
 		}
 
 		rawLayerID := layerIDHash.String()
@@ -167,12 +168,19 @@ func (p *HasModifiedFilesCheck) gatherDataToValidate(ctx context.Context, imgRef
 
 		layerIDs = append(layerIDs, layerID)
 
-		files, err := generateChangesFor(ctx, layer)
+		// Convert layerInfo to BlobInfo for containers/image API
+		blobInfo := types.BlobInfo{
+			Digest:    layerInfo.Digest,
+			Size:      layerInfo.Size,
+			MediaType: layerInfo.MediaType,
+		}
+
+		files, err := generateChangesFor(ctx, imgRef.ImageSource, blobInfo)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		found, pkgList := findRPMDB(ctx, layer)
+		found, pkgList := findRPMDB(ctx, imgRef.ImageSource, blobInfo)
 		if !found {
 			logger.V(log.TRC).Info("could not find rpm database in layer", "layer", layerID)
 			if idx > 0 {
@@ -348,23 +356,6 @@ func extractPackageNameVersionRelease(pkgList []*rpmdb.PackageInfo) map[string]p
 	return pkgNameList
 }
 
-// findRPMDB attempts to extract a valid RPMDB from layers in the order
-// they are provided. If found is false, pkglist should
-// be disregarded as any value there will be invalid.
-func findRPMDB(ctx context.Context, layer v1.Layer) (found bool, pkglist []*rpmdb.PackageInfo) {
-	logger := logr.FromContextOrDiscard(ctx)
-	var err error
-	pkglist, err = extractRPMDB(ctx, layer)
-	if err == nil {
-		id, _ := layer.Digest()
-		logger.V(log.TRC).Info("findRPMDB found an RPM db", "layer", id.String())
-		found = true
-		return
-	}
-
-	return found, pkglist
-}
-
 // directoryIsExcluded excludes a directory and any file contained in that directory.
 func directoryIsExcluded(ctx context.Context, s string) bool {
 	excl := map[string]struct{}{
@@ -502,18 +493,24 @@ type fileInfo struct {
 	Mode os.FileMode
 }
 
-// generateChangesFor will check layer for file changes, and will return a list of those.
-func generateChangesFor(ctx context.Context, layer v1.Layer) (map[string]fileInfo, error) {
+// generateChangesFor will check layer for file changes using containers/image blob API
+func generateChangesFor(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) (map[string]fileInfo, error) {
 	logger := logr.FromContextOrDiscard(ctx)
-	layerReader, err := layer.Uncompressed()
+	
+	// Get the blob for this layer with retry logic
+	blob, _, err := retry.WithRetry2(ctx, func() (io.ReadCloser, int64, error) {
+		return imgSrc.GetBlob(ctx, layerInfo, nil)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("reading layer contents: %w", err)
+		return nil, fmt.Errorf("reading layer blob: %w", err)
 	}
-	defer layerReader.Close()
-	tarReader := tar.NewReader(layerReader)
-	// Use a map so we can remove items easily. Will turn this into a string slice before returning
+	defer blob.Close()
+
+	tarReader := tar.NewReader(blob)
+	// Use a map so we can remove items easily
 	filelist := make(map[string]fileInfo)
 	var links []string
+	
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -568,14 +565,30 @@ func generateChangesFor(ctx context.Context, layer v1.Layer) (map[string]fileInf
 	return filelist, nil
 }
 
-// ExtractRPMDB copies /var/lib/rpm/* from the archive and derives a list of packages from
-// the rpm database.
-func extractRPMDB(ctx context.Context, layer v1.Layer) ([]*rpmdb.PackageInfo, error) {
-	layerReader, err := layer.Uncompressed()
-	if err != nil {
-		return nil, fmt.Errorf("reading layer contents: %w", err)
+// findRPMDB attempts to extract a valid RPMDB from layers using containers/image blob API
+func findRPMDB(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) (found bool, pkglist []*rpmdb.PackageInfo) {
+	logger := logr.FromContextOrDiscard(ctx)
+	var err error
+	pkglist, err = extractRPMDB(ctx, imgSrc, layerInfo)
+	if err == nil {
+		logger.V(log.TRC).Info("findRPMDB found an RPM db", "layer", layerInfo.Digest.String())
+		found = true
+		return
 	}
-	defer layerReader.Close()
+
+	return found, pkglist
+}
+
+// extractRPMDB copies /var/lib/rpm/* from the layer blob and derives a list of packages
+func extractRPMDB(ctx context.Context, imgSrc types.ImageSource, layerInfo types.BlobInfo) ([]*rpmdb.PackageInfo, error) {
+	// Get the blob for this layer with retry logic
+	blob, _, err := retry.WithRetry2(ctx, func() (io.ReadCloser, int64, error) {
+		return imgSrc.GetBlob(ctx, layerInfo, nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading layer blob: %w", err)
+	}
+	defer blob.Close()
 
 	fs := afero.NewOsFs()
 	basepath, err := afero.TempDir(fs, "", "rpmdb")
@@ -586,7 +599,7 @@ func extractRPMDB(ctx context.Context, layer v1.Layer) ([]*rpmdb.PackageInfo, er
 		_ = fs.RemoveAll(basepath)
 	}()
 
-	tarReader := tar.NewReader(layerReader)
+	tarReader := tar.NewReader(blob)
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -619,6 +632,7 @@ func extractRPMDB(ctx context.Context, layer v1.Layer) ([]*rpmdb.PackageInfo, er
 		if !strings.HasPrefix(filepath.Join(dirname, basename), rpmdirname) {
 			continue
 		}
+		
 		// a dir or file with the correct var/lib/rpm prefix that has not been marked with a tombstone is valid.
 		if header.Typeflag == tar.TypeDir {
 			err := os.MkdirAll(filepath.Join(basepath, dirname, basename), header.FileInfo().Mode())

@@ -8,7 +8,7 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/image"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/pyxis"
 
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/opencontainers/go-digest"
 )
 
 var _ check.Check = &BasedOnUBICheck{}
@@ -19,7 +19,7 @@ type BasedOnUBICheck struct {
 }
 
 type layerHashChecker interface {
-	CertifiedImagesContainingLayers(ctx context.Context, uncompressedLayerHashes []cranev1.Hash) ([]pyxis.CertImage, error)
+	CertifiedImagesContainingLayers(ctx context.Context, uncompressedLayerHashes []digest.Digest) ([]pyxis.CertImage, error)
 }
 
 func NewBasedOnUbiCheck(layerHashChecker layerHashChecker) *BasedOnUBICheck {
@@ -27,7 +27,7 @@ func NewBasedOnUbiCheck(layerHashChecker layerHashChecker) *BasedOnUBICheck {
 }
 
 func (p *BasedOnUBICheck) Validate(ctx context.Context, imgRef image.ImageReference) (bool, error) {
-	layerHashes, err := p.getImageLayers(imgRef.ImageInfo)
+	layerHashes, err := p.getImageLayers(imgRef)
 	if err != nil {
 		return false, fmt.Errorf("could not get image layers: %v", err)
 	}
@@ -36,18 +36,13 @@ func (p *BasedOnUBICheck) Validate(ctx context.Context, imgRef image.ImageRefere
 }
 
 // getImageLayers returns the root filesystem DiffIDs of the image.
-func (p *BasedOnUBICheck) getImageLayers(image cranev1.Image) ([]cranev1.Hash, error) {
-	configFile, err := image.ConfigFile()
-	if err != nil {
-		return nil, err
-	}
-
-	return configFile.RootFS.DiffIDs, nil
+func (p *BasedOnUBICheck) getImageLayers(imgRef image.ImageReference) ([]digest.Digest, error) {
+	return imgRef.GetLayerDiffIDs()
 }
 
 // certifiedImagesFound checks to make sure images exist in Red Hat Pyxis containing the uncompressed
 // top layer IDs of the image under test.
-func (p *BasedOnUBICheck) certifiedImagesFound(ctx context.Context, layerHashes []cranev1.Hash) (bool, error) {
+func (p *BasedOnUBICheck) certifiedImagesFound(ctx context.Context, layerHashes []digest.Digest) (bool, error) {
 	certImages, err := p.LayerHashCheckEngine.CertifiedImagesContainingLayers(ctx, layerHashes)
 	if err != nil {
 		return false, fmt.Errorf("pyxis query for uncompressed top layers ids %+q failed: %w", layerHashes, err)
@@ -58,7 +53,7 @@ func (p *BasedOnUBICheck) certifiedImagesFound(ctx context.Context, layerHashes 
 	return false, nil
 }
 
-func (p *BasedOnUBICheck) validate(ctx context.Context, layerHashes []cranev1.Hash) (bool, error) {
+func (p *BasedOnUBICheck) validate(ctx context.Context, layerHashes []digest.Digest) (bool, error) {
 	hasUBIHash, err := p.certifiedImagesFound(ctx, layerHashes)
 	if err != nil {
 		return false, fmt.Errorf("unable to verify layer hashes: %v", err)

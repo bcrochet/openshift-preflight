@@ -2,9 +2,8 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
-	fakecranev1 "github.com/google/go-containerregistry/pkg/v1/fake"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -29,20 +28,22 @@ func getLabels(bad bool) map[string]string {
 	return labels
 }
 
-func getConfigFile() (*cranev1.ConfigFile, error) {
-	return &cranev1.ConfigFile{
-		Config: cranev1.Config{
-			Labels: getLabels(false),
+func createTestImageRef(bad bool) image.ImageReference {
+	config := image.ParsedConfig{
+		Config: struct {
+			Labels map[string]string `json:"Labels"`
+			Cmd    []string          `json:"Cmd"`
+			User   string            `json:"User"`
+		}{
+			Labels: getLabels(bad),
 		},
-	}, nil
-}
+	}
 
-func getBadConfigFile() (*cranev1.ConfigFile, error) {
-	return &cranev1.ConfigFile{
-		Config: cranev1.Config{
-			Labels: getLabels(true),
-		},
-	}, nil
+	configBytes, _ := json.Marshal(config)
+
+	return image.ImageReference{
+		ConfigBytes: configBytes,
+	}
 }
 
 var _ = Describe("HasRequiredLabels", func() {
@@ -52,10 +53,7 @@ var _ = Describe("HasRequiredLabels", func() {
 	)
 
 	BeforeEach(func() {
-		fakeImage := fakecranev1.FakeImage{
-			ConfigFileStub: getConfigFile,
-		}
-		imageRef.ImageInfo = &fakeImage
+		imageRef = createTestImageRef(false)
 	})
 
 	Describe("Checking for required labels", func() {
@@ -68,10 +66,7 @@ var _ = Describe("HasRequiredLabels", func() {
 		})
 		Context("When it does not have required labels", func() {
 			BeforeEach(func() {
-				fakeImage := fakecranev1.FakeImage{
-					ConfigFileStub: getBadConfigFile,
-				}
-				imageRef.ImageInfo = &fakeImage
+				imageRef = createTestImageRef(true)
 			})
 			It("should not succeed the check", func() {
 				ok, err := hasRequiredLabelsCheck.Validate(context.TODO(), imageRef)

@@ -20,7 +20,7 @@ var _ check.Check = &HasRequiredLabelsCheck{}
 type HasRequiredLabelsCheck struct{}
 
 func (p *HasRequiredLabelsCheck) Validate(ctx context.Context, imgRef image.ImageReference) (bool, error) {
-	labels, err := getContainerLabels(imgRef.ImageInfo)
+	labels, err := getContainerLabels(imgRef)
 	if err != nil {
 		return false, fmt.Errorf("could not retrieve image labels: %v", err)
 	}

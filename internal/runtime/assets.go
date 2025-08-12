@@ -8,11 +8,12 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/authn"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
+	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/retry"
 
-	"github.com/google/go-containerregistry/pkg/crane"
-	cranev1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/containers/image/v5/transports/alltransports"
+	"github.com/containers/image/v5/types"
+	"github.com/containers/image/v5/manifest"
 )
 
 // images maps the images use by preflight with their purpose.
@@ -26,29 +27,70 @@ var images = map[string]string{
 
 // imageList takes the images mapping and represents them using just
 // the image URIs.
-func imageList(ctx context.Context) []string {
+func imageList(ctx context.Context, dockerConfig string) []string {
 	logger := logr.FromContextOrDiscard(ctx)
-	options := []crane.Option{
-		crane.WithContext(ctx),
-		crane.WithAuthFromKeychain(authn.PreflightKeychain(ctx)),
-		crane.WithPlatform(&cranev1.Platform{
-			OS: "linux",
-			// This remains the runtime arch, as we don't specify the arch for operators
-			Architecture: goruntime.GOARCH,
-		}),
+	
+	// Create system context for containers/image
+	sys := &types.SystemContext{
+		ArchitectureChoice: goruntime.GOARCH,
+		OSChoice:           "linux",
+	}
+	
+	// Set up authentication if docker config is provided
+	if dockerConfig != "" {
+		sys.AuthFilePath = dockerConfig
 	}
 
 	imageList := make([]string, 0, len(images))
 
 	for _, image := range images {
 		base := strings.Split(image, ":")[0]
-		digest, err := crane.Digest(image, options...)
+		
+		// Parse image reference
+		imageRef := image
+		if !strings.HasPrefix(imageRef, "docker://") {
+			imageRef = "docker://" + imageRef
+		}
+		ref, err := alltransports.ParseImageName(imageRef)
 		if err != nil {
-			logger.Error(fmt.Errorf("could not retrieve image digest: %w", err), "crane error")
-			// Skip this entry
+			logger.Error(fmt.Errorf("could not parse image reference: %w", err), "image reference error")
 			continue
 		}
-		imageList = append(imageList, fmt.Sprintf("%s@%s", base, digest))
+		
+		// Create a copy of system context for this image
+		imageSys := *sys
+		// Allow insecure connections for localhost/testing registries
+		if strings.Contains(base, "127.0.0.1") || strings.Contains(base, "localhost") {
+			imageSys.DockerInsecureSkipTLSVerify = types.NewOptionalBool(true)
+		}
+		
+		// Get image source and manifest to calculate digest with retry logic
+		src, err := retry.WithRetry(ctx, func() (types.ImageSource, error) {
+			return ref.NewImageSource(ctx, &imageSys)
+		})
+		if err != nil {
+			logger.Error(fmt.Errorf("could not create image source: %w", err), "image source error")
+			continue
+		}
+		
+		manifestBytes, _, err := retry.WithRetry2(ctx, func() ([]byte, string, error) {
+			return src.GetManifest(ctx, nil)
+		})
+		if err != nil {
+			src.Close()
+			logger.Error(fmt.Errorf("could not get manifest: %w", err), "manifest error")
+			continue
+		}
+		src.Close()
+		
+		// Calculate manifest digest
+		digest, err := manifest.Digest(manifestBytes)
+		if err != nil {
+			logger.Error(fmt.Errorf("could not calculate manifest digest: %w", err), "digest error")
+			continue
+		}
+		
+		imageList = append(imageList, fmt.Sprintf("%s@%s", base, digest.String()))
 	}
 
 	return imageList
@@ -57,7 +99,14 @@ func imageList(ctx context.Context) []string {
 // Assets returns a full collection of assets used in Preflight.
 func Assets(ctx context.Context) AssetData {
 	return AssetData{
-		Images: imageList(ctx),
+		Images: imageList(ctx, ""),
+	}
+}
+
+// AssetsWithAuth returns a full collection of assets used in Preflight with authentication.
+func AssetsWithAuth(ctx context.Context, dockerConfig string) AssetData {
+	return AssetData{
+		Images: imageList(ctx, dockerConfig),
 	}
 }
 

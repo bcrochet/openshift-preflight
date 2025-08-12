@@ -21,15 +21,15 @@ import (
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/formatters"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/lib"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/log"
-	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/option"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/runtime"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/internal/viper"
 	"github.com/redhat-openshift-ecosystem/openshift-preflight/version"
 
 	"github.com/go-logr/logr"
-	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/containers/image/v5/transports/alltransports"
+	"github.com/containers/image/v5/types"
+	"github.com/containers/image/v5/manifest"
+	"encoding/json"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -436,87 +436,120 @@ func platformsToBeProcessed(cmd *cobra.Command, cfg *runtime.Config) ([]string, 
 
 	containerImagePlatforms := []string{cfg.Platform}
 
-	options := crane.GetOptions(option.GenerateCraneOptions(ctx, cfg)...)
-	ref, err := name.ParseReference(cfg.Image, options.Name...)
+	// Parse image reference using containers/image
+	imageRef := cfg.Image
+	if !strings.HasPrefix(imageRef, "docker://") {
+		imageRef = "docker://" + imageRef
+	}
+	ref, err := alltransports.ParseImageName(imageRef)
 	if err != nil {
 		return nil, fmt.Errorf("invalid image reference: %w", err)
 	}
 
-	desc, err := remote.Get(ref, options.Remote...)
-	if err != nil {
-		return nil, fmt.Errorf("invalid manifest?: %w", err)
+	// Create system context for authentication and settings
+	sys := &types.SystemContext{
+		DockerInsecureSkipTLSVerify: types.NewOptionalBool(cfg.Insecure),
+		AuthFilePath:                cfg.DockerConfig,
+		ArchitectureChoice:          cfg.Platform,
+		OSChoice:                    "linux",
 	}
 
-	if !desc.MediaType.IsIndex() {
-		// This means the passed image is just an image, and not a manifest list
-		// So, let's get the config to find out if the image matches the
-		// given platform.
-		img, err := desc.Image()
+	// Get image source and manifest
+	src, err := ref.NewImageSource(ctx, sys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create image source: %w", err)
+	}
+	defer src.Close()
+
+	manifestBytes, manifestType, err := src.GetManifest(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get manifest: %w", err)
+	}
+
+	// Check if this is a manifest list (multi-platform)
+	if !manifest.MIMETypeIsMultiImage(manifestType) {
+		// This means the passed image is just an image, not a manifest list
+		// Get the image config to check platform compatibility
+		img, err := ref.NewImage(ctx, sys)
 		if err != nil {
-			return nil, fmt.Errorf("could not convert descriptor to image: %w", err)
+			return nil, fmt.Errorf("could not create image: %w", err)
 		}
-		cfgFile, err := img.ConfigFile()
+		defer img.Close()
+
+		configBlob, err := img.ConfigBlob(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("could not retrieve image config: %w", err)
 		}
 
-		// A specific arch was specified. This image does not contain that arch.
-		if cfgFile.Architecture != cfg.Platform && !platformChanged {
-			return nil, fmt.Errorf("cannot process image manifest of different arch without platform override")
+		// Parse config to get architecture
+		type ImageConfig struct {
+			Architecture string `json:"architecture"`
+		}
+		var imgConfig ImageConfig
+		if err := json.Unmarshal(configBlob, &imgConfig); err != nil {
+			return nil, fmt.Errorf("could not parse image config: %w", err)
 		}
 
-		// At this point, we know that the original containerImagePlatform is correct, so
-		// we can just return it and skip the below.
-		// While we could just let this fall through to the end, I'd rather short-circuit
-		// here, in case any further changes disrupt that logic flow.
+		// A specific arch was specified. This image does not contain that arch.
+		if imgConfig.Architecture != cfg.Platform && !platformChanged {
+			return nil, fmt.Errorf("cannot process image manifest of different arch without platform override")
+		}
+		// At this point, we know that the original containerImagePlatform is correct
 		return containerImagePlatforms, nil
 	}
 
-	// If platform param is not changed, it means that a platform was not specified on the
-	// command line. Therefore, we should process all platforms in the manifest list.
-	// As long as what is poinged to is a manifest list. Otherwise, it will just be the
-	// currnt runtime platform.
-	if desc.MediaType.IsIndex() {
-		logger.V(log.DBG).Info("manifest list detected, checking all platforms in manifest")
+	// Handle manifest list (multi-platform image)
+	logger.V(log.DBG).Info("manifest list detected, checking all platforms in manifest")
 
-		idx, err := desc.ImageIndex()
-		if err != nil {
-			return nil, fmt.Errorf("could not convert descriptor to index: %w", err)
-		}
-		manifestListDigest, err := idx.Digest()
-		if err != nil {
-			return nil, fmt.Errorf("could not retrieve index digest: %w", err)
-		}
-		cfg.ManifestListDigest = manifestListDigest.String()
+	// Parse the manifest list
+	list, err := manifest.ListFromBlob(manifestBytes, manifestType)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse manifest list: %w", err)
+	}
 
-		manifest, err := idx.IndexManifest()
-		if err != nil {
-			return nil, fmt.Errorf("could not retrieve index manifest: %w", err)
-		}
+	// Calculate manifest list digest
+	manifestDigest, err := manifest.Digest(manifestBytes)
+	if err != nil {
+		return nil, fmt.Errorf("could not calculate manifest digest: %w", err)
+	}
+	cfg.ManifestListDigest = manifestDigest.String()
 
-		// Preflight was given a manifest list. --platform was not specified.
-		// Therefore, all platforms in the manifest list that we support
-		// for certification ie: {"arm64", "amd64", "ppc64le", "s390x"}, should be processed.
-		// Create a new slice since the original was for a single platform.
-		containerImagePlatforms = make([]string, 0, len(manifest.Manifests))
-		for _, img := range manifest.Manifests {
-			if platformChanged && cfg.Platform != img.Platform.Architecture {
-				// The user selected a platform. If this isn't it, continue.
-				continue
-			}
-			if img.Platform.Architecture == "unknown" && img.Platform.OS == "unknown" {
-				// This must be an attestation manifest. Skip it.
-				continue
-			}
-			if !slices.Contains(allowedArchitectures(), img.Platform.Architecture) {
-				// The user has a architecture type in the manifest list that we do not support.
-				continue
-			}
-			containerImagePlatforms = append(containerImagePlatforms, img.Platform.Architecture)
+	// Preflight was given a manifest list. --platform was not specified.
+	// Therefore, all platforms in the manifest list that we support
+	// for certification ie: {"arm64", "amd64", "ppc64le", "s390x"}, should be processed.
+	// Create a new slice since the original was for a single platform.
+	instanceDigests := list.Instances()
+	containerImagePlatforms = make([]string, 0, len(instanceDigests))
+	for _, digest := range instanceDigests {
+		instanceInfo, err := list.Instance(digest)
+		if err != nil {
+			logger.V(log.DBG).Info("could not get instance info", "digest", digest, "error", err)
+			continue
 		}
-		if platformChanged && len(containerImagePlatforms) == 0 {
-			return nil, fmt.Errorf("invalid platform specified")
+		
+		if instanceInfo.ReadOnly.Platform == nil {
+			continue
 		}
+		
+		arch := instanceInfo.ReadOnly.Platform.Architecture
+		os := instanceInfo.ReadOnly.Platform.OS
+
+		if platformChanged && cfg.Platform != arch {
+			// The user selected a platform. If this isn't it, continue.
+			continue
+		}
+		if arch == "unknown" && os == "unknown" {
+			// This must be an attestation manifest. Skip it.
+			continue
+		}
+		if !slices.Contains(allowedArchitectures(), arch) {
+			// The user has an architecture type in the manifest list that we do not support.
+			continue
+		}
+		containerImagePlatforms = append(containerImagePlatforms, arch)
+	}
+	if platformChanged && len(containerImagePlatforms) == 0 {
+		return nil, fmt.Errorf("invalid platform specified")
 	}
 
 	return containerImagePlatforms, nil
