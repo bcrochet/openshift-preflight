@@ -225,6 +225,27 @@ func (p *HasModifiedFilesCheck) gatherDataToValidate(ctx context.Context, imgRef
 	return layerIDs, layerRefs, nil
 }
 
+// crossArchPackageAdded checks if a file's presence in the current layer can be
+// explained by a cross-architecture package being newly installed. This handles the
+// case where e.g. an i686 RPM is installed when an x86_64 RPM of the same
+// name-version-release already exists in the base layer. Shared files get re-written
+// into the new layer but this is legitimate RPM behavior.
+func crossArchPackageAdded(pkg packageMeta, currentLayerPackages, previousLayerPackages map[string]packageMeta) bool {
+	for nvra, candidate := range currentLayerPackages {
+		if candidate.Name == pkg.Name &&
+			candidate.Version == pkg.Version &&
+			candidate.Release == pkg.Release &&
+			candidate.Arch != pkg.Arch {
+			// Found a package with same name-version-release but different arch.
+			// Check if it was newly added in this layer.
+			if _, existedBefore := previousLayerPackages[nvra]; !existedBefore {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // validate compares the list of LayerFiles and PackageFiles to see what PackageFiles
 // have been modified within the additional layers. packageDist is the value we expect
 // to find in the base package's Release field.
@@ -257,11 +278,21 @@ func (p *HasModifiedFilesCheck) validate(ctx context.Context, layerIDs []string,
 			previousPackage := packageFiles[layerIDs[idx-1]].LayerPackages[previousPackageVersion]
 			currentPackage := ref.LayerPackages[currentPackageVersion]
 
-			if previousPackageVersion == currentPackageVersion {
-				previousFileInfo := fileInfo{}
-				// Since the modified file will not necessarily be present in the immediately previous layer, we need
-				// to go backwards through the layers to look for the last time this file was in a layer, and get the
-				// mode from there.
+		if previousPackageVersion == currentPackageVersion {
+			// Check if a cross-architecture package was newly installed in this layer.
+			// When e.g. an i686 RPM is installed alongside an existing x86_64 RPM of the
+			// same name-version-release, shared files are re-written by RPM. The dedup in
+			// installedFileMapWithExclusions maps the file to the first arch encountered,
+			// so both layers show the same package version. The file re-write is legitimate.
+			if crossArchPackageAdded(currentPackage, ref.LayerPackages, packageFiles[layerIDs[idx-1]].LayerPackages) {
+				logger.V(log.DBG).Info("cross-architecture package installed, shared file re-write allowed")
+				continue
+			}
+
+			previousFileInfo := fileInfo{}
+			// Since the modified file will not necessarily be present in the immediately previous layer, we need
+			// to go backwards through the layers to look for the last time this file was in a layer, and get the
+			// mode from there.
 				for layerIdx := idx - 1; layerIdx > -1; layerIdx-- {
 					if pfi, found := packageFiles[layerIDs[layerIdx]].LayerFiles[modifiedFile]; found {
 						previousFileInfo.Mode = pfi.Mode
@@ -317,12 +348,28 @@ func (p *HasModifiedFilesCheck) validate(ctx context.Context, layerIDs []string,
 				continue
 			}
 
-			// Check that the architectures for previous version and current version of a given package match
-			if previousPackage.Arch != currentPackage.Arch {
-				logger.Info("mismatch in package architecture", "file", modifiedFile)
-				disallowedModifications = true
-				continue
+		// Check that the architectures for previous version and current version of a given package match
+		if previousPackage.Arch != currentPackage.Arch {
+			// Allow cross-architecture installs where the new arch's package is a
+			// net-new addition with the same name-version-release AND the original
+			// arch package is still present (genuine multi-arch, not a replacement).
+			// This happens when installedFileMapWithExclusions picks the new arch as
+			// the primary owner due to iteration order.
+			if previousPackage.Name == currentPackage.Name &&
+				previousPackage.Version == currentPackage.Version &&
+				previousPackage.Release == currentPackage.Release {
+				currentNVRA := strings.Join([]string{currentPackage.Name, currentPackage.Version, currentPackage.Release, currentPackage.Arch}, "-")
+				_, currentIsNew := packageFiles[layerIDs[idx-1]].LayerPackages[currentNVRA]
+				_, previousStillExists := ref.LayerPackages[previousPackageVersion]
+				if !currentIsNew && previousStillExists {
+					logger.V(log.DBG).Info("cross-architecture package installed, architecture change allowed", "package", currentNVRA)
+					continue
+				}
 			}
+			logger.Info("mismatch in package architecture", "file", modifiedFile)
+			disallowedModifications = true
+			continue
+		}
 
 			// This appears like an update. This is allowed.
 			// No further action required

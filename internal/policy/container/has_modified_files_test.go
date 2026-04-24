@@ -326,6 +326,71 @@ var _ = Describe("HasModifiedFiles", func() {
 				Expect(ok).To(BeTrue())
 			})
 		})
+		When("a cross-architecture package is installed sharing files with existing package", func() {
+			// Simulates the scenario from issue #1127: an i686 RPM is installed when
+			// an x86_64 RPM of the same name-version-release already exists in the base
+			// layer. Shared files are re-written by RPM into the new layer. Because
+			// installedFileMapWithExclusions deduplicates cross-arch files, both layers
+			// map the file to the same (first-encountered) architecture.
+			var pkgs map[string]packageFilesRef
+			BeforeEach(func() {
+				pkgs = deepCopyPackage(pkgRef)
+
+				// Add the shared file to secondlayer's LayerFiles (RPM re-wrote it)
+				pkgSecondLayer := pkgs["secondlayer"]
+				pkgSecondLayer.LayerFiles["this"] = fileInfo{Mode: fileMask}
+
+				// The file still maps to the x86_64 NVR due to dedup in
+				// installedFileMapWithExclusions — this is the same as firstlayer
+				// ("foo-1.0-1.d9" with Arch "fooarch").
+
+				// Add the new i686 package to secondlayer's LayerPackages
+				pkgSecondLayer.LayerPackages["foo-1.0-1.d9-i686"] = packageMeta{
+					Name:    "foo",
+					Version: "1.0",
+					Release: "1.d9",
+					Arch:    "i686",
+					Vendor:  "Red Hat, Inc.",
+				}
+				pkgs["secondlayer"] = pkgSecondLayer
+			})
+			It("should pass validate", func() {
+				ok, err := hasModifiedFiles.validate(context.Background(), layers, pkgs, dist)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ok).To(BeTrue())
+			})
+		})
+		When("a cross-architecture package is installed and file maps to new arch", func() {
+			// Same scenario as above, but installedFileMapWithExclusions picked the
+			// new arch (i686) as the primary file owner due to iteration order. This
+			// causes previousPackageVersion != currentPackageVersion and triggers the
+			// arch-mismatch branch.
+			var pkgs map[string]packageFilesRef
+			BeforeEach(func() {
+				pkgs = deepCopyPackage(pkgRef)
+
+				pkgSecondLayer := pkgs["secondlayer"]
+				pkgSecondLayer.LayerFiles["this"] = fileInfo{Mode: fileMask}
+
+				// File now maps to the i686 NVR (different from firstlayer's fooarch)
+				pkgSecondLayer.LayerPackageFiles["this"] = "foo-1.0-1.d9-i686"
+
+				// Add the i686 package metadata
+				pkgSecondLayer.LayerPackages["foo-1.0-1.d9-i686"] = packageMeta{
+					Name:    "foo",
+					Version: "1.0",
+					Release: "1.d9",
+					Arch:    "i686",
+					Vendor:  "Red Hat, Inc.",
+				}
+				pkgs["secondlayer"] = pkgSecondLayer
+			})
+			It("should pass validate", func() {
+				ok, err := hasModifiedFiles.validate(context.Background(), layers, pkgs, dist)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ok).To(BeTrue())
+			})
+		})
 		When("the package release dist changes", func() {
 			var pkgs map[string]packageFilesRef
 			BeforeEach(func() {
