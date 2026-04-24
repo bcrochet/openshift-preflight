@@ -54,8 +54,10 @@ type packageFilesRef struct {
 	// the NVR of the package. The value is metadata about the package
 	// that we use for processing
 	LayerPackages map[string]packageMeta
-	// LayerPackageFiles maps files to a package name-version-release
-	LayerPackageFiles map[string]string
+	// LayerPackageFiles maps files to all owning package name-version-release-arch
+	// entries. A file may be owned by multiple packages when cross-architecture
+	// RPMs are installed (e.g., both x86_64 and i686 versions of the same package).
+	LayerPackageFiles map[string][]string
 	HasRPMDB          bool
 }
 
@@ -228,6 +230,57 @@ func (p *HasModifiedFilesCheck) gatherDataToValidate(ctx context.Context, imgRef
 // validate compares the list of LayerFiles and PackageFiles to see what PackageFiles
 // have been modified within the additional layers. packageDist is the value we expect
 // to find in the base package's Release field.
+// findMatchingVersion finds a common NVRA between current and previous version slices.
+// Returns the matched previous and current versions, and whether a match was found.
+func findMatchingVersion(currentVersions, previousVersions []string) (matchedPrev, matchedCurr string, found bool) {
+	for _, cv := range currentVersions {
+		for _, pv := range previousVersions {
+			if cv == pv {
+				return pv, cv, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// isCrossArchAddition checks whether a file appearing in both layers is explained
+// by a cross-architecture package install (e.g., i686 added alongside existing x86_64).
+// It returns true when all previous versions still exist in the current layer AND at
+// least one current version is a net-new package that shares name-version-release with
+// a previous version but differs only in architecture.
+func isCrossArchAddition(currentVersions, previousVersions []string, currentLayerPackages, previousLayerPackages map[string]packageMeta) bool {
+	if len(previousVersions) == 0 || len(currentVersions) == 0 {
+		return false
+	}
+
+	// All previous versions must still be present in the current layer (not replaced)
+	currentSet := make(map[string]struct{}, len(currentVersions))
+	for _, cv := range currentVersions {
+		currentSet[cv] = struct{}{}
+	}
+	for _, pv := range previousVersions {
+		if _, still := currentSet[pv]; !still {
+			return false
+		}
+	}
+
+	// At least one current version must be genuinely new AND share name-version-release
+	// (but different arch) with a previous version
+	for _, cv := range currentVersions {
+		if _, existed := previousLayerPackages[cv]; existed {
+			continue
+		}
+		cp := currentLayerPackages[cv]
+		for _, pv := range previousVersions {
+			pp := previousLayerPackages[pv]
+			if cp.Name == pp.Name && cp.Version == pp.Version && cp.Release == pp.Release && cp.Arch != pp.Arch {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (p *HasModifiedFilesCheck) validate(ctx context.Context, layerIDs []string, packageFiles map[string]packageFilesRef, packageDist string) (bool, error) {
 	logger := logr.FromContextOrDiscard(ctx)
 
@@ -244,16 +297,33 @@ func (p *HasModifiedFilesCheck) validate(ctx context.Context, layerIDs []string,
 				// Just skip these in the first layer
 				continue
 			}
-			if _, found := ref.LayerPackageFiles[modifiedFile]; !found {
+			currentVersions := ref.LayerPackageFiles[modifiedFile]
+			if len(currentVersions) == 0 {
 				// Far as we can tell, this isn't from an RPM
 				continue
 			}
-			previousPackageVersion, prevFound := packageFiles[layerIDs[idx-1]].LayerPackageFiles[modifiedFile]
-			if !prevFound && ref.HasRPMDB {
+			previousVersions := packageFiles[layerIDs[idx-1]].LayerPackageFiles[modifiedFile]
+			if len(previousVersions) == 0 && ref.HasRPMDB {
 				// This is a net-new package file. Pass it.
 				continue
 			}
-			currentPackageVersion := ref.LayerPackageFiles[modifiedFile]
+
+			// Check if this is a cross-architecture package addition (e.g., i686 installed
+			// alongside existing x86_64). Shared files get re-written by RPM but this is
+			// legitimate behavior.
+			if isCrossArchAddition(currentVersions, previousVersions, ref.LayerPackages, packageFiles[layerIDs[idx-1]].LayerPackages) {
+				logger.V(log.DBG).Info("cross-architecture package installed, shared file re-write allowed")
+				continue
+			}
+
+			// Find the matching version between current and previous for comparison
+			previousPackageVersion, currentPackageVersion, matched := findMatchingVersion(currentVersions, previousVersions)
+			if !matched {
+				// No common version — use the first entries for comparison
+				previousPackageVersion = previousVersions[0]
+				currentPackageVersion = currentVersions[0]
+			}
+
 			previousPackage := packageFiles[layerIDs[idx-1]].LayerPackages[previousPackageVersion]
 			currentPackage := ref.LayerPackages[currentPackageVersion]
 
@@ -465,7 +535,7 @@ func normalize(s string) string {
 
 // installedFileMapWithExclusions gets a map of installed filenames that have been cleaned
 // of extra slashes, dotslashes, and leading slashes.
-func installedFileMapWithExclusions(ctx context.Context, pkglist []*rpmdb.PackageInfo) (map[string]string, error) {
+func installedFileMapWithExclusions(ctx context.Context, pkglist []*rpmdb.PackageInfo) (map[string][]string, error) {
 	const okFlags = rpmdb.RPMFILE_CONFIG |
 		rpmdb.RPMFILE_DOC |
 		rpmdb.RPMFILE_LICENSE |
@@ -475,7 +545,7 @@ func installedFileMapWithExclusions(ctx context.Context, pkglist []*rpmdb.Packag
 		rpmdb.RPMFILE_GHOST
 	// Estimate map size based on typical package file counts
 	estimatedFiles := len(pkglist) * 200 // average files across all UBI versions/variants plus some headroom
-	m := make(map[string]string, estimatedFiles)
+	m := make(map[string][]string, estimatedFiles)
 	for _, pkg := range pkglist {
 		files, err := pkg.InstalledFiles()
 		if err != nil {
@@ -505,20 +575,8 @@ func installedFileMapWithExclusions(ctx context.Context, pkglist []*rpmdb.Packag
 				continue
 			}
 
-			// checking to see if the file is already in the map.
-			// check to see if all attributes of the rpm match except architecture.
-			// this is to support cross architecture file ownership,
-			// the 2nd architecture we encounter, we can skip it.
-			if val, found := m[normalized]; found {
-				s := strings.Split(val, "-")
-				name, version, release, arch := s[0], s[1], s[2], s[3]
-
-				if name == pkg.Name && version == pkg.Version && release == pkg.Release && arch != pkg.Arch {
-					continue
-				}
-			}
-
-			m[normalized] = strings.Join([]string{pkg.Name, pkg.Version, pkg.Release, pkg.Arch}, "-")
+			nvra := strings.Join([]string{pkg.Name, pkg.Version, pkg.Release, pkg.Arch}, "-")
+			m[normalized] = append(m[normalized], nvra)
 		}
 	}
 

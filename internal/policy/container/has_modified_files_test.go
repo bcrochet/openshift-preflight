@@ -76,11 +76,11 @@ var _ = Describe("HasModifiedFiles", func() {
 					Vendor:  "Red Hat, Inc.",
 				},
 			},
-			LayerPackageFiles: map[string]string{
-				"this":      "foo-1.0-1.d9",
-				"is":        "bar-1.0-1.d9",
-				"not":       "baz-2.0-1.d9",
-				"uidgidset": "baz-2.0-1.d9",
+			LayerPackageFiles: map[string][]string{
+				"this":      {"foo-1.0-1.d9"},
+				"is":        {"bar-1.0-1.d9"},
+				"not":       {"baz-2.0-1.d9"},
+				"uidgidset": {"baz-2.0-1.d9"},
 			},
 			HasRPMDB: true,
 		}
@@ -123,13 +123,13 @@ var _ = Describe("HasModifiedFiles", func() {
 					Vendor:  "Red Hat, Inc.",
 				},
 			},
-			LayerPackageFiles: map[string]string{
-				"this":      "foo-1.0-1.d9",
-				"is":        "bar-1.0-1.d9",
-				"not":       "baz-2.0-1.d9",
-				"uidgidset": "baz-2.0-1.d9",
-				"no":        "boz-3.0-1.d9",
-				"there":     "boz-3.0-1.d9",
+			LayerPackageFiles: map[string][]string{
+				"this":      {"foo-1.0-1.d9"},
+				"is":        {"bar-1.0-1.d9"},
+				"not":       {"baz-2.0-1.d9"},
+				"uidgidset": {"baz-2.0-1.d9"},
+				"no":        {"boz-3.0-1.d9"},
+				"there":     {"boz-3.0-1.d9"},
 			},
 			HasRPMDB: true,
 		}
@@ -167,11 +167,11 @@ var _ = Describe("HasModifiedFiles", func() {
 					Vendor:  "Red Hat, Inc.",
 				},
 			},
-			LayerPackageFiles: map[string]string{
-				"this":      "foo-1.0-1.d9",
-				"is":        "bar-1.0-1.d9",
-				"not":       "baz-2.0-1.d9",
-				"uidgidset": "baz-2.0-1.d9",
+			LayerPackageFiles: map[string][]string{
+				"this":      {"foo-1.0-1.d9"},
+				"is":        {"bar-1.0-1.d9"},
+				"not":       {"baz-2.0-1.d9"},
+				"uidgidset": {"baz-2.0-1.d9"},
 			},
 		}
 		layers = []string{
@@ -300,7 +300,7 @@ var _ = Describe("HasModifiedFiles", func() {
 				pkgs = deepCopyPackage(pkgRef)
 				pkgSecondLayer := pkgs["secondlayer"]
 				pkgSecondLayerPackageFiles := pkgSecondLayer.LayerPackageFiles
-				pkgSecondLayerPackageFiles["this"] = "foo-2.0-d9"
+				pkgSecondLayerPackageFiles["this"] = []string{"foo-2.0-d9"}
 				pkgSecondLayer.LayerPackageFiles = pkgSecondLayerPackageFiles
 				pkgs["secondlayer"] = pkgSecondLayer
 			})
@@ -326,6 +326,37 @@ var _ = Describe("HasModifiedFiles", func() {
 				Expect(ok).To(BeTrue())
 			})
 		})
+		When("a cross-architecture package is installed sharing files with existing package", func() {
+			// Simulates the scenario from issue #1127: an i686 RPM is installed when
+			// an x86_64 RPM of the same name-version-release already exists in the base
+			// layer. Shared files are re-written by RPM into the new layer.
+			var pkgs map[string]packageFilesRef
+			BeforeEach(func() {
+				pkgs = deepCopyPackage(pkgRef)
+
+				pkgSecondLayer := pkgs["secondlayer"]
+				// The shared file appears in this layer (RPM re-wrote it)
+				pkgSecondLayer.LayerFiles["this"] = fileInfo{Mode: fileMask}
+
+				// File is now owned by both architectures
+				pkgSecondLayer.LayerPackageFiles["this"] = []string{"foo-1.0-1.d9", "foo-1.0-1.d9-i686"}
+
+				// Add the new i686 package
+				pkgSecondLayer.LayerPackages["foo-1.0-1.d9-i686"] = packageMeta{
+					Name:    "foo",
+					Version: "1.0",
+					Release: "1.d9",
+					Arch:    "i686",
+					Vendor:  "Red Hat, Inc.",
+				}
+				pkgs["secondlayer"] = pkgSecondLayer
+			})
+			It("should pass validate", func() {
+				ok, err := hasModifiedFiles.validate(context.Background(), layers, pkgs, dist)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ok).To(BeTrue())
+			})
+		})
 		When("the package release dist changes", func() {
 			var pkgs map[string]packageFilesRef
 			BeforeEach(func() {
@@ -333,7 +364,7 @@ var _ = Describe("HasModifiedFiles", func() {
 
 				pkgSecondLayerPackageFiles := pkgs["secondlayer"].LayerPackageFiles
 				delete(pkgSecondLayerPackageFiles, "this")
-				pkgSecondLayerPackageFiles["this"] = "foo-1.0-1.d10"
+				pkgSecondLayerPackageFiles["this"] = []string{"foo-1.0-1.d10"}
 
 				pkgSecondLayerPackages := pkgs["secondlayer"].LayerPackages
 				delete(pkgSecondLayerPackages, "foo-1.0-1.d9")
@@ -368,7 +399,7 @@ var _ = Describe("HasModifiedFiles", func() {
 
 				pkgSecondLayerPackageFiles := pkgs["secondlayer"].LayerPackageFiles
 				delete(pkgSecondLayerPackageFiles, "this")
-				pkgSecondLayerPackageFiles["this"] = "foo-1.0-1.d10"
+				pkgSecondLayerPackageFiles["this"] = []string{"foo-1.0-1.d10"}
 
 				pkgSecondLayerPackages := pkgs["secondlayer"].LayerPackages
 				delete(pkgSecondLayerPackages, "foo-1.0-1.d9")
@@ -413,7 +444,7 @@ var _ = Describe("HasModifiedFiles", func() {
 							Arch:    "x86_64",
 						}
 						pkgSecondLayerPackageFiles := pkgs["secondlayer"].LayerPackageFiles
-						pkgSecondLayerPackageFiles["otherfile"] = "other-1.0-1.oth"
+						pkgSecondLayerPackageFiles["otherfile"] = []string{"other-1.0-1.oth"}
 						pkgSecondLayerFiles := pkgs["secondlayer"].LayerFiles
 						pkgSecondLayerFiles["otherfile"] = fileInfo{
 							Mode: fs.ModePerm,
@@ -461,7 +492,7 @@ var _ = Describe("HasModifiedFiles", func() {
 			zeroPkgRef["zerolayer"] = packageFilesRef{
 				LayerFiles:        map[string]fileInfo{},
 				LayerPackages:     make(map[string]packageMeta),
-				LayerPackageFiles: make(map[string]string),
+				LayerPackageFiles: make(map[string][]string),
 				HasRPMDB:          false,
 			}
 			zeroLayers = append([]string{"zerolayer"}, layers...)
@@ -554,8 +585,10 @@ var _ = Describe("HasModifiedFiles", func() {
 			files, err := installedFileMapWithExclusions(context.TODO(), goodPkgList)
 			Expect(err).ToNot(HaveOccurred())
 
-			_, ok := files[path.Join(dirname, basename)]
+			owners, ok := files[path.Join(dirname, basename)]
 			Expect(ok).To(BeTrue())
+			// Both x86_64 and i686 packages own the same file
+			Expect(owners).To(HaveLen(2))
 		})
 
 		It("should fail if the rpm is invalid", func() {
