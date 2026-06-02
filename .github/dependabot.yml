@@ -6,6 +6,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    allow:
+      - dependency-type: "direct"
+      # Explicitly add the tool
+      - dependency-name: "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
     cooldown:
       default-days: 7
     groups:
