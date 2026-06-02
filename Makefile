@@ -10,9 +10,16 @@ PLATFORMS=linux darwin
 ARCHITECTURES_LINUX=amd64 arm64 ppc64le s390x
 ARCHITECTURES_MAC=amd64 arm64
 
+# Microarchitecture levels: match UBI9 baseline for backward compatibility.
+# UBI10 defaults to GOAMD64=v3 and GOPPC64=power9, which produce binaries
+# incompatible with older processors. These can be overridden at build time
+# (e.g. make build GOAMD64=v3) if a higher baseline is desired.
+GOAMD64 ?= v2
+GOPPC64 ?= power8
+
 .PHONY: build
 build:
-	CGO_ENABLED=0 go build -o $(BINARY) -trimpath -ldflags "-s -w -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.commit=$(VERSION) -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.version=$(RELEASE_TAG)" cmd/preflight/main.go
+	CGO_ENABLED=0 GOAMD64=$(GOAMD64) GOPPC64=$(GOPPC64) go build -o $(BINARY) -trimpath -ldflags "-s -w -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.commit=$(VERSION) -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.version=$(RELEASE_TAG)" cmd/preflight/main.go
 	@ls | grep -e '^preflight$$' &> /dev/null
 
 .PHONY: build-multi-arch-linux
@@ -21,7 +28,7 @@ build-multi-arch-linux: $(addprefix build-linux-,$(ARCHITECTURES_LINUX))
 define LINUX_ARCHITECTURE_template
 .PHONY: build-linux-$(1)
 build-linux-$(1):
-	GOOS=linux GOARCH=$(1) CGO_ENABLED=0 go build -o $(BINARY)-linux-$(1) -trimpath -ldflags "-s -w -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.commit=$(VERSION) \
+	GOOS=linux GOARCH=$(1) CGO_ENABLED=0 GOAMD64=$(GOAMD64) GOPPC64=$(GOPPC64) go build -o $(BINARY)-linux-$(1) -trimpath -ldflags "-s -w -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.commit=$(VERSION) \
 				-X github.com/redhat-openshift-ecosystem/openshift-preflight/version.version=$(RELEASE_TAG)" cmd/preflight/main.go
 endef
 
@@ -33,21 +40,26 @@ build-multi-arch-mac: $(addprefix build-mac-,$(ARCHITECTURES_MAC))
 define MAC_ARCHITECTURE_template
 .PHONY: build-mac-$(1)
 build-mac-$(1):
-	GOOS=darwin GOARCH=$(1) CGO_ENABLED=0 go build -o $(BINARY)-darwin-$(1) -trimpath -ldflags "-s -w -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.commit=$(VERSION) \
+	GOOS=darwin GOARCH=$(1) CGO_ENABLED=0 GOAMD64=$(GOAMD64) go build -o $(BINARY)-darwin-$(1) -trimpath -ldflags "-s -w -X github.com/redhat-openshift-ecosystem/openshift-preflight/version.commit=$(VERSION) \
 				-X github.com/redhat-openshift-ecosystem/openshift-preflight/version.version=$(RELEASE_TAG)" cmd/preflight/main.go
 endef
 
 $(foreach arch,$(ARCHITECTURES_MAC),$(eval $(call MAC_ARCHITECTURE_template,$(arch))))
 
 .PHONY: fmt
-fmt: gofumpt golangci-lint
+fmt: gofumpt
 	${GOFUMPT} -l -w .
-	$(GOLANGCI_LINT) fmt
+	go tool -modfile=tools/go.mod golangci-lint fmt
 	git diff --exit-code
 
 .PHONY: tidy
 tidy:
 	go mod tidy
+	git diff --exit-code
+
+.PHONY: tidy-tools
+tidy-tools:
+	go mod -modfile=tools/go.mod tidy
 	git diff --exit-code
 
 .PHONY: image-build
@@ -83,8 +95,8 @@ vet:
 	go vet -tags testing ./...
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter checks.
-	$(GOLANGCI_LINT) run --build-tags testing
+lint: ## Run golangci-lint linter checks.
+	go tool -modfile=tools/go.mod golangci-lint run --build-tags testing
 	
 .PHONY: test-e2e
 test-e2e:
@@ -119,12 +131,6 @@ clean:
 	$(foreach GOOS, $(PLATFORMS),\
 	$(foreach GOARCH, $(ARCHITECTURES_MAC),\
 	$(shell if [ -f "$(BINARY)-$(GOOS)-$(GOARCH)" ]; then rm -f $(BINARY)-$(GOOS)-$(GOARCH); fi)))
-
-GOLANGCI_LINT = $(shell pwd)/bin/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.8.0
-golangci-lint: $(GOLANGCI_LINT)
-$(GOLANGCI_LINT):
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION))
 
 GOFUMPT = $(shell pwd)/bin/gofumpt
 GOFUMPT_VERSION ?= v0.9.0
